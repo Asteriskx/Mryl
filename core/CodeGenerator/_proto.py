@@ -50,6 +50,8 @@ class _CodeGeneratorBase:
     local_box_vars:              list             # [(c_var_name, type_node)] Box 変数（宣言順）
     box_inner_moved:             set              # 内部ポインタが別変数に移動済みの c_var_name 集合
     local_box_vec_vars:          list             # [(c_var_name, inner_type_node)] Vec<Box<T>> 変数
+    local_struct_box_vars:       list             # [(c_var_name, struct_name)] Box フィールド持ち struct 変数（#68）
+    local_option_box_vars:       list             # [c_var_name] Option<Box<T>> 変数（#67）
 
     # ------------------------------------------------------------------
     # 出力系 (__init__.py 実装)
@@ -102,6 +104,8 @@ class _CodeGeneratorBase:
     def _generate_enum(self, enum_decl: Any) -> None: ...
     def _generate_enum_variant_expr(self, expr: Any) -> str: ...
     def _infer_struct_name(self, method_name: str) -> str: ...
+    def _struct_has_box_fields(self, struct: Any) -> bool: ...
+    def _emit_struct_destructor(self, struct: Any) -> None: ...
 
     # ------------------------------------------------------------------
     # ラムダ (_lambda.py 実装)

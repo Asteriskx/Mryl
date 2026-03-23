@@ -7,8 +7,58 @@ class CodeGeneratorStructMixin(_CodeGeneratorBase):
     _generate_enum_variant_expr / _infer_struct_name
     """
 
+    def _struct_has_box_fields(self, struct) -> bool:
+        """struct が Box<T> フィールド（または Box フィールドを持つ struct フィールド）を持つか判定する。
+        ユーザー定義 struct Box がある場合は built-in Box ではないため false を返す。
+        循環参照防止のため visited セットを持つ内部再帰版 _has_box を使用する。"""
+        if self.has_user_box:
+            return False
+
+        def _has_box(s, visited: set) -> bool:
+            if s.name in visited:
+                return False  # 循環参照防止
+            visited.add(s.name)
+            for field in s.fields:
+                tn = field.type_node
+                if tn is None or isinstance(tn, str):
+                    continue
+                if tn.name == "Box":
+                    return True
+                # ネスト struct のフィールドを再帰チェック
+                inner = next((ns for ns in self.structs if ns.name == tn.name), None)
+                if inner and _has_box(inner, visited):
+                    return True
+            return False
+
+        return _has_box(struct, set())
+
+    def _emit_struct_destructor(self, struct) -> None:
+        """Box<T> フィールドを持つ struct のデストラクタ関数を生成する。
+        生成例: static inline void mryl_free_Node(Node s) { free(s.label); }
+        ネスト struct フィールドは mryl_free_InnerStruct(s.field) を再帰的に呼ぶ。"""
+        if not self._struct_has_box_fields(struct):
+            return
+        self._emit(f"static inline void mryl_free_{struct.name}({struct.name} s) {{")
+        self.indent_level += 1
+        for field in struct.fields:
+            tn = field.type_node
+            if tn is None or isinstance(tn, str):
+                continue
+            if tn.name == "Box":
+                # Box<T> フィールド: _emit_box_free と同じロジックで s.field_name を free
+                self._emit_box_free(f"s.{field.name}", tn)
+            else:
+                # ネスト struct フィールド: そのデストラクタを呼ぶ
+                inner = next((ns for ns in self.structs if ns.name == tn.name), None)
+                if inner and self._struct_has_box_fields(inner):
+                    self._emit(f"mryl_free_{tn.name}(s.{field.name});")
+        self.indent_level -= 1
+        self._emit("}")
+        self._emit("")
+
     def _generate_struct(self, struct):
-        """構造体宣言を typedef struct として出力する。"""
+        """構造体宣言を typedef struct として出力する。
+        Box<T> フィールドを持つ struct には mryl_free_StructName() デストラクタも生成する（#68）。"""
         if getattr(struct, 'type_params', None):
             return  # ジェネリック構造体は具体化時に _scan_generic_struct_uses で出力
         self._emit(f"// Struct: {struct.name}")
@@ -20,6 +70,8 @@ class CodeGeneratorStructMixin(_CodeGeneratorBase):
         self.indent_level -= 1
         self._emit(f"}} {struct.name};")
         self._emit("")
+        # Box<T> フィールドを持つ struct はデストラクタを生成する（#68）
+        self._emit_struct_destructor(struct)
 
     def _generate_enum(self, enum_decl):
         """EnumDecl を C コードとして出力する

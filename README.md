@@ -1089,6 +1089,42 @@ let dist = p.distance();
 println("Distance: {}", dist);
 ```
 
+### Box フィールドを持つ struct の自動メモリ解放
+
+`Box<T>` 型のフィールドを持つ struct は、コンパイラが自動的に **デストラクタ関数 `mryl_free_StructName()`** を生成します。
+この関数は struct 変数のスコープ終了時・`return` 文実行前に自動で呼ばれ、Box フィールドを `free` します。
+手動で `free` を呼ぶ必要はありません。
+
+```mryl
+struct Node {
+    value: i32;
+    data: Box<i32>;
+}
+
+fn example() {
+    let n = Node { value: 1, data: Box::new(42) };
+    println("{}", *n.data);
+    // スコープ終了時に mryl_free_Node(n) が自動呼び出し → free(n.data)
+}
+```
+
+ネストした struct（フィールドに別の struct を持つ場合）も再帰的に解放されます。
+
+```mryl
+struct Inner {
+    x: Box<i32>;
+}
+
+struct Outer {
+    inner: Inner;
+}
+
+fn example() {
+    let o = Outer { inner: Inner { x: Box::new(10) } };
+    // スコープ終了時: mryl_free_Outer(o) → mryl_free_Inner(o.inner) → free(o.inner.x)
+}
+```
+
 ---
 
 ## static fn（静的メソッド）
@@ -1479,6 +1515,17 @@ let bb2: Box<Box<i32>> = Box::new(Box::new(5));
 ```mryl
 let boxes: Box<i32>[] = ...;
 // → for 各要素 { free(element) } → free(boxes.data)
+```
+
+#### Option<Box<T>>
+
+`Option<Box<T>>` 変数は、スコープ終了時に値が存在する場合のみ `free` されます。
+
+```mryl
+fn example() {
+    let ob: Option<Box<i32>> = Some(Box::new(99));
+    // スコープ終了時: if(ob.has_value) free(ob.value)
+}
 ```
 
 ---

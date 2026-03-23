@@ -102,6 +102,8 @@ class CodeGenerator(
         self.box_inner_moved             = set() # 内部ポインタが別変数に移動済みの c_var_name 集合
         self.local_box_vec_vars          = []    # [(c_var_name, inner_type_node)] Vec<Box<T>> 変数
         self.local_toarray_vec_vars      = []    # [c_var_name] to_array() 結果の Vec 変数（.data を free）
+        self.local_struct_box_vars       = []    # [(c_var_name, struct_name)] Box フィールド持ち struct 変数（#68）
+        self.local_option_box_vars       = []    # [c_var_name] Option<Box<T>> 変数（#67）
 
     # ------------------------------------------------------------------
     # メインエントリポイント
@@ -137,6 +139,8 @@ class CodeGenerator(
         self.box_inner_moved             = set() # 内部ポインタ移動済みの c_var_name 集合
         self.local_box_vec_vars          = []    # [(c_var_name, inner_type_node)]
         self.local_toarray_vec_vars      = []    # [c_var_name] to_array() 結果の Vec 変数
+        self.local_struct_box_vars       = []    # [(c_var_name, struct_name)] Box フィールド持ち struct（#68）
+        self.local_option_box_vars       = []    # [c_var_name] Option<Box<T>>（#67）
 
         # 全関数をキャッシュ
         self.program_functions = {func.name: func for func in program.functions}
@@ -470,6 +474,8 @@ class CodeGenerator(
         self.box_inner_moved        = set() # 内部ポインタ移動済み集合（関数スコープ）
         self.local_box_vec_vars     = []    # Vec<Box<T>> 変数追跡（関数スコープ）
         self.local_toarray_vec_vars = []    # to_array() 結果 Vec 変数追跡（関数スコープ）
+        self.local_struct_box_vars  = []    # Box フィールド持ち struct 変数追跡（#68）
+        self.local_option_box_vars  = []    # Option<Box<T>> 変数追跡（#67）
         self.temp_string_counter = 0
         saved_renames            = self.ident_renames.copy()
         self.ident_renames       = {}
@@ -542,6 +548,12 @@ class CodeGenerator(
             # to_array() 結果 Vec 変数: .data を free（#71）
             for vn in reversed(self.local_toarray_vec_vars):
                 self._emit(f"free({vn}.data);")
+            # Box フィールド持ち struct 変数: デストラクタを呼ぶ（#68）
+            for (vn, sname) in reversed(self.local_struct_box_vars):
+                self._emit(f"mryl_free_{sname}({vn});")
+            # Option<Box<T>> 変数: has_value なら Box を free（#67）
+            for vn in reversed(self.local_option_box_vars):
+                self._emit(f"if ({vn}.has_value) {{ free({vn}.value); }}")
 
         if not has_return:
             if func.name == "main":
@@ -611,18 +623,22 @@ class CodeGenerator(
 
         # _generate_return 内の cleanup が参照するためメソッド開始時に初期化する
         # Box 系も同様にリセットしないと前のメソッドの状態が漏れる（CRITICAL）
-        saved_str_vars           = getattr(self, 'local_string_vars', [])
-        saved_temp_ctr           = getattr(self, 'temp_string_counter', 0)
-        saved_box_vars           = self.local_box_vars
-        saved_box_inner          = self.box_inner_moved
+        saved_str_vars              = getattr(self, 'local_string_vars', [])
+        saved_temp_ctr              = getattr(self, 'temp_string_counter', 0)
+        saved_box_vars              = self.local_box_vars
+        saved_box_inner             = self.box_inner_moved
         saved_box_vec_vars          = self.local_box_vec_vars
         saved_toarray_vec_vars      = self.local_toarray_vec_vars
+        saved_struct_box_vars       = self.local_struct_box_vars
+        saved_option_box_vars       = self.local_option_box_vars
         self.local_string_vars      = []
         self.temp_string_counter    = 0
         self.local_box_vars         = []
         self.box_inner_moved        = set()
         self.local_box_vec_vars     = []
         self.local_toarray_vec_vars = []
+        self.local_struct_box_vars  = []
+        self.local_option_box_vars  = []
 
         # env に self と引数を登録（_infer_expr_type が struct フィールド型を解決できるようにする）
         method_env: dict = {}
@@ -656,6 +672,12 @@ class CodeGenerator(
             # to_array() 結果 Vec 変数: .data を free（#71）
             for vn in reversed(self.local_toarray_vec_vars):
                 self._emit(f"free({vn}.data);")
+            # Box フィールド持ち struct 変数: デストラクタを呼ぶ（#68）
+            for (vn, sname) in reversed(self.local_struct_box_vars):
+                self._emit(f"mryl_free_{sname}({vn});")
+            # Option<Box<T>> 変数: has_value なら Box を free（#67）
+            for vn in reversed(self.local_option_box_vars):
+                self._emit(f"if ({vn}.has_value) {{ free({vn}.value); }}")
 
         # 復元
         self.local_string_vars      = saved_str_vars
@@ -664,6 +686,8 @@ class CodeGenerator(
         self.box_inner_moved        = saved_box_inner
         self.local_box_vec_vars     = saved_box_vec_vars
         self.local_toarray_vec_vars = saved_toarray_vec_vars
+        self.local_struct_box_vars  = saved_struct_box_vars
+        self.local_option_box_vars  = saved_option_box_vars
 
         self.indent_level -= 1
         self._emit("}")

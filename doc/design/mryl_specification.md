@@ -1,7 +1,7 @@
 ﻿# Mryl プログラミング言語 - 完全仕様書
 
-**バージョン**: 0.5.0
-**最終更新**: 2026年3月14日
+**バージョン**: 0.6.0
+**最終更新**: 2026年3月23日
 
 ---
 
@@ -291,6 +291,9 @@ Mryl/
 | 自動 free（ループ） | while / for の各イテレーション末に `_emit_loop_iteration_cleanup` で free |
 | `Box<Box<T>>` inner_moved | `let X: Box<T> = *Y` パターンで `Y` を `box_inner_moved` にマーク → `free(Y)` のみ（二重 free 防止） |
 | `Box<T>[]`（`Vec<Box<T>>`） | 要素ごと free 後に `.data` を free（`_emit_box_vec_free`） |
+| struct Box フィールド自動デストラクタ | Box フィールドを持つ struct に `mryl_free_StructName()` を自動生成。ネスト struct は再帰呼び出し。`_struct_has_box_fields()` で循環参照防止付き判定 |
+| struct Box フィールド自動 free | struct 変数をスコープ終了・return・ループイテレーション末に `mryl_free_StructName()` で解放（`local_struct_box_vars` で追跡）。VarRef フィールドは所有権移動とみなし double free 防止 |
+| `Option<Box<T>>` 自動 free | `Option<Box<T>>` 変数を `local_option_box_vars` で追跡。スコープ終了・return 時に `if(has_value) free(value)` を emit |
 | TypeChecker | `Box<T>` → `TypeNode("Box", type_args=[inner])` |
 | CodeGenerator | `Box<T>` → `T*`、`Box::new(v)` → `({ T* p = malloc(sizeof(T)); *p = v; p; })` |
 | ユーザー定義構造体との共存 | `generate()` 開始時に `has_user_box` をキャッシュ。`struct Box` が存在する場合は組み込み Box を無効化 |
@@ -734,6 +737,26 @@ let d = p.distance();  // → Point_distance(p) に変換 → 7
 
 let pair = Pair { first: 10, second: 20 };
 let x = pair.get_first();  // → Pair_T_get_first(pair)
+```
+
+### Box フィールドを持つ struct の自動デストラクタ
+
+`Box<T>` 型フィールドを持つ struct に対し、コンパイラは `mryl_free_StructName()` を自動生成する。
+struct 変数はスコープ終了・`return` 前・ループイテレーション末に自動解放される。
+
+| 項目 | 内容 |
+|------|------|
+| デストラクタ生成条件 | `_struct_has_box_fields()` で Box フィールドの有無を再帰判定（循環参照防止付き） |
+| Box フィールド | `free(s.field)` を emit |
+| ネスト struct フィールド | `mryl_free_Inner(s.field)` を再帰的に emit |
+| 追跡変数 | `local_struct_box_vars` で struct 変数を管理 |
+| double free 防止 | `StructInit` での `VarRef` フィールドは所有権移動とみなし追跡対象から除外 |
+
+```c
+// 生成例
+void mryl_free_Node(Node s) {
+    free(s.data);
+}
 ```
 
 ---
