@@ -131,6 +131,14 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
             self._emit(f"    v->data[idx] = val;")
             self._emit(f"    v->len++;")
             self._emit(f"}}")
+            # string 要素の場合は各要素の char* も解放するデストラクタを追加する。
+            # 通常の free(v.data) では MrylString 構造体の配列しか解放されず、
+            # 内部の char* がリークするため専用の free 関数が必要。
+            if T == "string":
+                self._emit(f"static inline void mryl_vec_string_free(MrylVec_string v) {{")
+                self._emit(f"    for (int32_t i = 0; i < v.len; i++) free_mryl_string(v.data[i]);")
+                self._emit(f"    free(v.data);")
+                self._emit(f"}}")
             self._emit(f"")
 
     def _emit_builtin_functions(self):

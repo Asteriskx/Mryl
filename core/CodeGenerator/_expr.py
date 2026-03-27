@@ -812,7 +812,13 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
 
         # src_cap / src_free もそれぞれ1文として改行を付ける
         src_cap  = f"MrylVec_{et} {src_var} = {obj_c};{NL}" if src_is_temp else ""
-        src_free = f"free({src_var}.data);{NL}" if src_is_temp else ""
+        # string 要素の場合は各要素の char* も解放する専用関数を使う。
+        # 通常の free(v.data) だと MrylString 構造体の配列のみ解放され char* がリークする。
+        if src_is_temp:
+            src_free = (f"mryl_vec_string_free({src_var});{NL}" if et == "string"
+                        else f"free({src_var}.data);{NL}")
+        else:
+            src_free = ""
 
         # statement expression の開閉テンプレート
         OPEN  = f"({{{NL}"
@@ -902,17 +908,21 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         if method == 'filter':
             lam_setup, lam_fn, lam_env = _lam_full(0)
             r = f"__iter_{idx}"
+            # string 要素の場合は push 時に deep copy する。
+            # src_free で元 vec の char* が解放された後も結果 vec の要素が有効であるために必要。
+            push_val = (f"make_mryl_string({src_ref}.data[{i_var}].data)"
+                        if et == "string" else f"{src_ref}.data[{i_var}]")
             return (
                 f"{OPEN}"
-                f"{src_cap}"
-                f"{lam_setup}"
-                f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
-                f"for (int32_t {i_var} = 0; {i_var} < {src_ref}.len; {i_var}++) {{"
-                f" if ({lam_fn}({src_ref}.data[{i_var}], {lam_env})) {{"
-                f" mryl_vec_{et}_push(&{r}, {src_ref}.data[{i_var}]); }} }}{NL}"
-                f"{src_free}"
-                f"{r};"
-                f"{CLOSE}"
+                + f"{src_cap}"
+                + f"{lam_setup}"
+                + f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
+                + f"for (int32_t {i_var} = 0; {i_var} < {src_ref}.len; {i_var}++) {{"
+                + f" if ({lam_fn}({src_ref}.data[{i_var}], {lam_env})) {{"
+                + f" mryl_vec_{et}_push(&{r}, {push_val}); }} }}{NL}"
+                + f"{src_free}"
+                + f"{r};"
+                + f"{CLOSE}"
             )
 
         # ── take ─────────────────────────────────────────────────
@@ -939,27 +949,34 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             s = f"__s_{idx}"
             r = f"__iter_{idx}"
             if src_is_temp:
+                # string 要素の場合は push 時に deep copy する（filter と同じ理由）。
+                push_val = (f"make_mryl_string({src_ref}.data[{i_var}].data)"
+                            if et == "string" else f"{src_ref}.data[{i_var}]")
                 return (
                     f"{OPEN}"
-                    f"{src_cap}"
-                    f"int32_t {s} = ({n} < {src_ref}.len ? {n} : {src_ref}.len);{NL}"
-                    f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
-                    f"for (int32_t {i_var} = {s}; {i_var} < {src_ref}.len; {i_var}++) {{"
-                    f" mryl_vec_{et}_push(&{r}, {src_ref}.data[{i_var}]); }}{NL}"
-                    f"{src_free}"
-                    f"{r};"
-                    f"{CLOSE}"
+                    + f"{src_cap}"
+                    + f"int32_t {s} = ({n} < {src_ref}.len ? {n} : {src_ref}.len);{NL}"
+                    + f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
+                    + f"for (int32_t {i_var} = {s}; {i_var} < {src_ref}.len; {i_var}++) {{"
+                    + f" mryl_vec_{et}_push(&{r}, {push_val}); }}{NL}"
+                    + f"{src_free}"
+                    + f"{r};"
+                    + f"{CLOSE}"
                 )
             else:
+                # ユーザー変数に対しても view（ポインタ算術）ではなくコピー方式を使う。
+                # view の .data はオリジナルの途中ポインタのため、後続の first() 等が
+                # src_is_temp=True と判断して free すると UB になるため。
+                push_val = (f"make_mryl_string({obj_c}.data[{i_var}].data)"
+                            if et == "string" else f"{obj_c}.data[{i_var}]")
                 return (
                     f"{OPEN}"
-                    f"int32_t {s} = ({n} < {obj_c}.len ? {n} : {obj_c}.len);{NL}"
-                    f"MrylVec_{et} {r};{NL}"
-                    f"{r}.data = {obj_c}.data + {s};{NL}"
-                    f"{r}.len  = {obj_c}.len - {s};{NL}"
-                    f"{r}.cap  = {obj_c}.cap - {s};{NL}"
-                    f"{r};"
-                    f"{CLOSE}"
+                    + f"int32_t {s} = ({n} < {obj_c}.len ? {n} : {obj_c}.len);{NL}"
+                    + f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
+                    + f"for (int32_t {i_var} = {s}; {i_var} < {obj_c}.len; {i_var}++) {{"
+                    + f" mryl_vec_{et}_push(&{r}, {push_val}); }}{NL}"
+                    + f"{r};"
+                    + f"{CLOSE}"
                 )
 
         # ── to_array ─────────────────────────────────────────────
@@ -1036,16 +1053,23 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             struct = f"MrylResult_{ct}_MrylString"
             self.result_type_registry.add((ct, "MrylString", struct))
             r = f"__first_{idx}"
+            # string 要素の場合は src_free で char* が解放される前に deep copy する。
+            # shallow copy のまま src_free すると ok_val.data がダングリングになる。
+            ok_line = (
+                f"else {{ {r}.is_ok = 1; {r}.data.ok_val = make_mryl_string({src_ref}.data[0].data); }}{NL}"
+                if et == "string" else
+                f"else {{ {r}.is_ok = 1; {r}.data.ok_val = {src_ref}.data[0]; }}{NL}"
+            )
             return (
                 f"{OPEN}"
-                f"{src_cap}"
-                f"{struct} {r};{NL}"
-                f"if ({src_ref}.len == 0) {{"
-                f" {r}.is_ok = 0; {r}.data.err_val = make_mryl_string(\"empty sequence\"); }}{NL}"
-                f"else {{ {r}.is_ok = 1; {r}.data.ok_val = {src_ref}.data[0]; }}{NL}"
-                f"{src_free}"
-                f"{r};"
-                f"{CLOSE}"
+                + f"{src_cap}"
+                + f"{struct} {r};{NL}"
+                + f"if ({src_ref}.len == 0) {{"
+                + f" {r}.is_ok = 0; {r}.data.err_val = make_mryl_string(\"empty sequence\"); }}{NL}"
+                + ok_line
+                + f"{src_free}"
+                + f"{r};"
+                + f"{CLOSE}"
             )
 
         # ── aggregate ────────────────────────────────────────────
