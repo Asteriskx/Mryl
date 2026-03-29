@@ -2002,6 +2002,7 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_36_for_each_void_stmt.ml](../tests/test_36_for_each_void_stmt.ml) | `for_each` void 文式・キャプチャあり fat pointer ラムダ（#64） | ✅ Python + C + Native |
 | [tests/test_37_iter_lambda_typecheck.ml](../tests/test_37_iter_lambda_typecheck.ml) | `Iter<T>` メソッドへのラムダ引数型検査（#63、C0/C1/MC/DC） | ✅ Python + C + Native |
 | [tests/test_38_async_result.ml](../tests/test_38_async_result.ml) | `async fn` + `Result<T,E>` FAULTED 状態伝播（#51） | ✅ Python + C + Native |
+| [tests/test_42_iter_lambda_param_count.ml](../tests/test_42_iter_lambda_param_count.ml) | `Iter<T>` ラムダ引数数チェック（#69、C0） | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 

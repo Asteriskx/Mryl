@@ -320,10 +320,11 @@ class TypeCheckerCallMixin:
             """Iter<T> を表す TypeNode を生成する（内部表現は array_size=-1）。"""
             return TypeNode(t.name, type_args=t.type_args, array_size=-1)
 
-        def _check_lambda_sig(arg_idx, expected_param=None, expected_ret=None):
-            """ラムダ/関数引数の fn 型を取得し、引数型・戻り値型を検査する。
+        def _check_lambda_sig(arg_idx, expected_param=None, expected_ret=None, expected_count=None):
+            """ラムダ/関数引数の fn 型を取得し、引数数・引数型・戻り値型を検査する。
 
             check_expr を呼ぶことでラムダの inferred_return_type もセットされる。
+            expected_count: None → スキップ。int → パラメータ数を照合。
             expected_param: None → スキップ。TypeNode → elem_type と照合。
             expected_ret:   None → スキップ。TypeNode → 戻り値型と照合。
             戻り値: fn TypeNode（type_args = [param..., return_type]）
@@ -338,6 +339,15 @@ class TypeCheckerCallMixin:
 
             type_args = fn_type.type_args or []
             # type_args = [param0_type, ..., return_type]（最後が戻り値型）
+
+            # パラメータ数検査: type_args の末尾が戻り値型なので len-1 がパラメータ数
+            if expected_count is not None and type_args:
+                actual_count = len(type_args) - 1
+                if actual_count != expected_count:
+                    raise TypeError_(
+                        f"'{method}': lambda expects {expected_count} parameter(s), got {actual_count}",
+                        arg_expr
+                    )
 
             # パラメータ型検査: 'any'（アノテーションなしラムダ）はスキップ
             if expected_param is not None and len(type_args) >= 2:
@@ -365,7 +375,7 @@ class TypeCheckerCallMixin:
 
         if method == 'select':
             # select(fn(T)->U) -> Iter<U>
-            fn_type = _check_lambda_sig(0, expected_param=elem_type, expected_ret=None)
+            fn_type = _check_lambda_sig(0, expected_param=elem_type, expected_ret=None, expected_count=1)
             if fn_type and fn_type.type_args:
                 raw = fn_type.type_args[-1]
                 u = raw if isinstance(raw, TypeNode) else TypeNode(raw)
@@ -375,7 +385,7 @@ class TypeCheckerCallMixin:
 
         if method == 'filter':
             # filter(fn(T)->bool) -> Iter<T>
-            _check_lambda_sig(0, expected_param=elem_type, expected_ret=TypeNode('bool'))
+            _check_lambda_sig(0, expected_param=elem_type, expected_ret=TypeNode('bool'), expected_count=1)
             return _iter(elem_type)
 
         if method in ('take', 'skip'):
@@ -384,7 +394,7 @@ class TypeCheckerCallMixin:
 
         if method == 'select_many':
             # select_many(fn(T)->U[]) -> Iter<U>
-            fn_type = _check_lambda_sig(0, expected_param=elem_type, expected_ret=None)
+            fn_type = _check_lambda_sig(0, expected_param=elem_type, expected_ret=None, expected_count=1)
             if fn_type and fn_type.type_args:
                 raw = fn_type.type_args[-1]
                 u = raw if isinstance(raw, TypeNode) else TypeNode(raw)
@@ -399,17 +409,17 @@ class TypeCheckerCallMixin:
         if method == 'aggregate':
             if len(expr.args) == 1:
                 # 初期値なし: aggregate(fn(T,T)->T) -> Result<T, string>
-                _check_lambda_sig(0, expected_param=None, expected_ret=None)
+                _check_lambda_sig(0, expected_param=None, expected_ret=None, expected_count=2)
                 return TypeNode('Result', type_args=[elem_type, TypeNode('string')])
             else:
                 # 初期値あり: aggregate(seed: U, fn(U,T)->U) -> U
                 u = self.check_expr(expr.args[0]) if expr.args else elem_type
-                _check_lambda_sig(1, expected_param=None, expected_ret=None)
+                _check_lambda_sig(1, expected_param=None, expected_ret=None, expected_count=2)
                 return u
 
         if method == 'for_each':
             # for_each(fn(T)->void) -> void: 戻り値型は強制しない（値が捨てられるため）
-            _check_lambda_sig(0, expected_param=elem_type, expected_ret=None)
+            _check_lambda_sig(0, expected_param=elem_type, expected_ret=None, expected_count=1)
             return TypeNode('void')
 
         if method == 'count':
@@ -420,7 +430,7 @@ class TypeCheckerCallMixin:
 
         if method in ('any', 'all'):
             # any/all(fn(T)->bool) -> bool
-            _check_lambda_sig(0, expected_param=elem_type, expected_ret=TypeNode('bool'))
+            _check_lambda_sig(0, expected_param=elem_type, expected_ret=TypeNode('bool'), expected_count=1)
             return TypeNode('bool')
 
         raise TypeError_(f"Unknown iter method '{method}'", expr)

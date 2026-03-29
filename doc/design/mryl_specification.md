@@ -383,6 +383,9 @@ arr.for_each(...);            // OK: 文として使用
 | 中間 `MrylVec` のメモリリーク | `issue_iter_intermediate_memleak.md` | ✅ v0.5.0 #62 解決 |
 | `for_each` void statement expression の GCC 拡張依存 | `issue_iter_for_each_void_stmtexpr.md` | ✅ v0.5.0 #64 解決 |
 | ラムダ引数型検査が浅い | `issue_iter_lambda_typecheck_shallow.md` | ⚠️ #63 未対応 |
+| ラムダ引数数チェック未実装 | `issue_iter_lambda_param_count.md` | ✅ v0.6.0 #69 解決 |
+| `for_each` ラムダ内ミュータブルキャプチャ非対応 | `issue_for_each_mutable_capture.md` | ⚠️ #83 v0.7.0 候補 |
+| 多次元配列（`i32[][]` 以上）未対応 | `issue_2d_array_unsupported.md` | ⚠️ #82 v0.7.0 候補 |
 | `select_many` VarRef ラムダ時の所有権 | — | ⚠️ 将来の所有権機能で対応予定 |
 
 ---
