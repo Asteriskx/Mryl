@@ -5,7 +5,7 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
     """非同期ステートマシン生成を担当する Mixin
     _sm_let_c_type / _split_by_await /
     _generate_async_state_machine / _emit_await_setup /
-    _emit_await_resume / _generate_sm_stmt /
+    _generate_sm_stmt /
     _emit_task_complete / _emit_task_factory /
     _emit_main_sm_entry / _emit_task_runtime
     """
@@ -344,32 +344,6 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
         self._emit("return;")
         self.indent_level -= 1
         self._emit("}")
-
-    def _emit_await_resume(self, await_stmt, await_index: int = 0):
-        """await 再開時( resume )の結果取得コードを出力する """
-        cls = await_stmt.__class__.__name__
-        if await_index in self.sm_await_handles:
-            handle = f"__sm->{self.sm_await_handles[await_index]}"
-        else:
-            if cls == 'ExprStmt':
-                handle = self._generate_expr(await_stmt.expr.expr)
-            else:
-                handle = self._generate_expr(await_stmt.init_expr.expr)
-
-        if cls == 'LetDecl':
-            var = await_stmt.name
-            if await_stmt.type_node and await_stmt.type_node.name != 'void':
-                ctype = self._type_to_c(await_stmt.type_node)
-                self._emit(f"if ({handle}->state == MRYL_TASK_CANCELLED) {{")
-                self.indent_level += 1
-                self._emit(f"__sm->{var} = 0;")
-                self.indent_level -= 1
-                self._emit("} else {")
-                self.indent_level += 1
-                self._emit(f"__sm->{var} = *({ctype}*){handle}->result;")
-                self.indent_level -= 1
-                self._emit("}")
-        self._emit(f"__task_release({handle});")
 
     def _generate_sm_stmt(self, stmt, func, has_return_val: bool):
         """SM 内文を出力する (LetDecl/ReturnStmt は SM フィールドへ代入) """

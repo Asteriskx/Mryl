@@ -21,7 +21,7 @@
   _lambda.py  - CodeGeneratorLambdaMixin (_body_has_await / _collect_captures /
                 _generate_lambda / _generate_lambda_inline / _generate_async_lambda)
   _async.py   - CodeGeneratorAsyncMixin (_sm_let_c_type / _split_by_await /
-                _generate_async_state_machine / _emit_await_setup / _emit_await_resume /
+                _generate_async_state_machine / _emit_await_setup /
                 _generate_sm_stmt / _emit_task_complete / _emit_task_factory /
                 _emit_main_sm_entry / _emit_task_runtime)
   _generic.py - CodeGeneratorGenericMixin (_register_generic_instantiation /
