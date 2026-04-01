@@ -670,10 +670,8 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         # 動的配列 (MrylVec_<T>) のメソッド
         if obj_type.startswith("vec_"):
             et       = obj_type[4:]
-            obj_name = (
-                expr.obj.name if expr.obj.__class__.__name__ == 'VarRef'
-                else self._generate_expr(expr.obj)
-            )
+            # SM モードでは VarRef に __sm-> プレフィックスが必要なため常に _generate_expr を使用する
+            obj_name = self._generate_expr(expr.obj)
             if expr.method == 'push':
                 arg = self._generate_expr(expr.args[0])
                 return f"mryl_vec_{et}_push(&{obj_name}, {arg})"

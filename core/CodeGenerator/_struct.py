@@ -143,6 +143,20 @@ class CodeGeneratorStructMixin(_CodeGeneratorBase):
         type_name    = expr.enum_name
         member_name  = expr.variant_name
 
+        # Task::when_all / Task::when_any — 型別ランタイム関数呼び出しを生成する
+        # ユーザー定義 struct Task がある場合は通常の static fn として処理する
+        if type_name == "Task" and member_name in ("when_all", "when_any") \
+                and not any(s.name == "Task" for s in self.structs):
+            arr  = expr.args[0]          # ArrayLiteral
+            elems = arr.elements
+            count = len(elems)
+            elem_strs = ", ".join(self._generate_expr(e) for e in elems)
+            # TypeChecker が付与した要素型名を使用（型推論環境が未構築な場合でも正確）
+            T_name = getattr(expr, '_combinator_elem_type', None) or "i32"
+            fac = f"__mryl_{member_name}_{T_name}"
+            # C99 複合リテラルでタスク配列を渡す
+            return f"{fac}((MrylTask*[{count}]){{{elem_strs}}}, {count})"
+
         # Box::new(v) → GCC statement expression: ({T* __p = malloc(sizeof(T)); *__p = v; __p;})
         # ユーザー定義 struct Box がある場合は通常の static fn として処理する
         if type_name == "Box" and member_name == "new" and expr.args and not self.has_user_box:

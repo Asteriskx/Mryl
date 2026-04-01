@@ -201,6 +201,10 @@ class CodeGenerator(
         if used_vec_types:
             self._emit_vec_helpers(used_vec_types)
 
+        # Task コンビネータヘルパー（MrylVec ヘルパーの後に出力する必要あり）
+        combinator_types = self._collect_combinator_types(program)
+        self._emit_combinator_helpers(combinator_types)
+
         # 構造体メソッドの出力
         for struct in program.structs:
             if not struct.methods:

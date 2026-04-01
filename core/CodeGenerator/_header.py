@@ -74,6 +74,53 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
                 walk_stmt(func.body)
         return types
 
+    def _collect_combinator_types(self, program) -> dict:
+        """AST を走査して Task::when_all / when_any の使用型を収集する。
+        T は LetDecl の型注釈から取得する（型推論環境が未構築のため _infer_expr_type は使えない）。
+        戻り値: { T_name: set_of_combinators }  例: {"i32": {"when_all"}}
+        """
+        result = {}
+
+        def check_let(s):
+            """LetDecl が `let x: T = await Task::when_*(...)` の形か確認し型を登録する。"""
+            ie = s.init_expr
+            if ie is None or ie.__class__.__name__ != 'AwaitExpr':
+                return
+            inner = ie.expr
+            if inner.__class__.__name__ != 'EnumVariantExpr':
+                return
+            if inner.enum_name != 'Task' or inner.variant_name not in ('when_all', 'when_any'):
+                return
+            if not inner.args or not hasattr(inner.args[0], 'elements'):
+                return
+            # 型注釈から T を取得（when_all: i32[]→"i32"、when_any: i32→"i32"）
+            t = s.type_node
+            if t is None:
+                return
+            T_name = t.name  # TypeNode("i32", array_size=-1).name == "i32"
+            result.setdefault(T_name, set()).add(inner.variant_name)
+
+        def walk_stmt(s):
+            if s is None:
+                return
+            cls = s.__class__.__name__
+            if cls == 'LetDecl':
+                check_let(s)
+            elif cls == 'Block':
+                for st in s.statements:
+                    walk_stmt(st)
+            elif cls == 'IfStmt':
+                walk_stmt(s.then_block)
+                if s.else_block:
+                    walk_stmt(s.else_block)
+            elif cls in ('WhileStmt', 'ForStmt'):
+                walk_stmt(s.body)
+
+        for func in program.functions:
+            if func.body:
+                walk_stmt(func.body)
+        return result
+
     def _emit_vec_helpers(self, elem_types: set):
         """MrylVec_<T> 構造体とヘルパー関数を出力する。
         "Box_T" 形式の要素型は T* ポインタ型として扱う（Vec<Box<T>> サポート）。

@@ -846,6 +846,40 @@ fn main() {
 
 ---
 
+### Task コンビネータ（v0.6.0）
+
+複数の `Future<T>` を同時に待機する静的メソッドです。
+
+| API | 説明 |
+|-----|------|
+| `Task::when_all([t1, t2, ...])` | 全タスクの完了を待機し、結果を配列で返す（`Future<T[]>`） |
+| `Task::when_any([t1, t2, ...])` | 最初に完了したタスクの結果を返す（`Future<T>`） |
+
+```mryl
+async fn fetch(n: i32) -> i32 { return n; }
+
+fn main() {
+    let t1 = fetch(10);
+    let t2 = fetch(20);
+
+    // when_all: 全件完了を待機 → 結果配列
+    let all: i32[] = await Task::when_all([t1, t2]);
+    println("{}", all[0]);   // 10
+    println("{}", all[1]);   // 20
+
+    let t3 = fetch(1);
+    let t4 = fetch(2);
+
+    // when_any: 最初に完了した値を取得（FIFO スケジューラ → t3 が先）
+    let first: i32 = await Task::when_any([t3, t4]);
+    println("{}", first);    // 1
+}
+```
+
+> **制限（v0.6.0）**: 要素型 `T` は `void` および `Result<T,E>` 非対応。全要素が同一型であること。
+
+---
+
 ### アーキテクチャ概要
 
 Mryl の async/await は **C# 風の状態機械 + シングルスレッドスケジューラ** で実装されています。
@@ -2003,6 +2037,7 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_37_iter_lambda_typecheck.ml](../tests/test_37_iter_lambda_typecheck.ml) | `Iter<T>` メソッドへのラムダ引数型検査（#63、C0/C1/MC/DC） | ✅ Python + C + Native |
 | [tests/test_38_async_result.ml](../tests/test_38_async_result.ml) | `async fn` + `Result<T,E>` FAULTED 状態伝播（#51） | ✅ Python + C + Native |
 | [tests/test_42_iter_lambda_param_count.ml](../tests/test_42_iter_lambda_param_count.ml) | `Iter<T>` ラムダ引数数チェック（#69、C0） | ✅ Python + C + Native |
+| [tests/test_43_task_when_all_any.ml](../tests/test_43_task_when_all_any.ml) | `Task::when_all` / `Task::when_any` コンビネータ（#61、C0/C1） | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 

@@ -85,6 +85,37 @@ class TypeCheckerExprMixin:
             return self.check_lambda(expr)
 
         if isinstance(expr, EnumVariantExpr):
+            # Task::when_all / Task::when_any — ユーザー定義 struct Task がない場合のみ
+            if expr.enum_name == "Task" and expr.variant_name in ("when_all", "when_any") \
+                    and not self.structs.get("Task"):
+                if not expr.args or not expr.has_parens:
+                    raise TypeError_(f"Task::{expr.variant_name} requires an array argument", expr)
+                arr = expr.args[0]
+                if not isinstance(arr, ArrayLiteral) or not arr.elements:
+                    raise TypeError_(f"Task::{expr.variant_name} argument must be a non-empty array literal", expr)
+                # 各要素が Future<T> であることを確認、T を取得
+                elem_type = self.check_expr(arr.elements[0])
+                if elem_type.name != "Future" or not elem_type.type_args:
+                    raise TypeError_(f"Task::{expr.variant_name}: elements must be async task (Future<T>), got {elem_type}", arr.elements[0])
+                T = elem_type.type_args[0]
+                if T.name == "void":
+                    raise TypeError_(f"Task::{expr.variant_name}: void Task is not supported", expr)
+                if T.name == "Result":
+                    raise TypeError_(f"Task::{expr.variant_name}: Result<T,E> Task is not supported in v0.6.0 (see issue)", expr)
+                # 全要素の型が一致することを確認
+                for elem in arr.elements[1:]:
+                    et = self.check_expr(elem)
+                    if not self.types_equal(et, elem_type):
+                        raise TypeError_(f"Task::{expr.variant_name}: all tasks must have the same type, got {et} and {elem_type}", elem)
+                # CodeGenerator で型別ランタイム関数を選択できるよう T 名を AST ノードに付与
+                expr._combinator_elem_type = T.name
+                if expr.variant_name == "when_all":
+                    # Future<T[]>
+                    return TypeNode("Future", type_args=[TypeNode(T.name, array_size=-1)])
+                else:
+                    # Future<T>
+                    return TypeNode("Future", type_args=[T])
+
             # Box::new(v) — Box<T> を返す（ユーザー定義 struct Box がない場合のみ）
             if expr.enum_name == "Box" and expr.variant_name == "new" and expr.args \
                     and not self.structs.get("Box"):

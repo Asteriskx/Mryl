@@ -839,6 +839,38 @@ class Interpreter:
         raise RuntimeError("await: expression is not a Future")
 
     def _eval_enum_variant_expr(self, expr: EnumVariantExpr, env):
+        # Task::when_all / Task::when_any — ユーザー定義 struct Task がない場合のみ
+        if expr.enum_name == "Task" and expr.variant_name in ("when_all", "when_any") \
+                and "Task" not in self.structs:
+            arr = self.eval_expr(expr.args[0], env)  # list of futures
+            futures = arr if isinstance(arr, list) else list(arr)
+
+            # 子タスクと同一 loop を使用する（loop が混在しないよう先頭 future から取得）
+            loop = futures[0]['loop'] if futures and futures[0].get('loop') else None
+            if loop is None:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        raise RuntimeError("already running")
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+            if expr.variant_name == "when_all":
+                async def _when_all_coro(fs=futures):
+                    tasks = [f['task'] for f in fs]
+                    results = await asyncio.gather(*tasks)
+                    return list(results)
+                return {'__future__': True, 'task': loop.create_task(_when_all_coro()), 'loop': loop}
+            else:
+                async def _when_any_coro(fs=futures):
+                    tasks = [f['task'] for f in fs]
+                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for t in pending:
+                        t.cancel()
+                    return next(iter(done)).result()
+                return {'__future__': True, 'task': loop.create_task(_when_any_coro()), 'loop': loop}
+
         # Box::new(v) — ヒープアロケーション相当（ユーザー定義 struct Box がない場合のみ）
         if expr.enum_name == "Box" and expr.variant_name == "new" \
                 and "Box" not in self.structs:

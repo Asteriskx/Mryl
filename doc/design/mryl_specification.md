@@ -1,7 +1,7 @@
 ﻿# Mryl プログラミング言語 - 完全仕様書
 
 **バージョン**: 0.6.0
-**最終更新**: 2026年3月23日
+**最終更新**: 2026年4月1日
 
 ---
 
@@ -205,6 +205,28 @@ Mryl/
 | `await h` | void 非同期の完了待機 |
 | `Future<T>` | 非同期タスクの型。C コードでは `MrylTask*` |
 | C コード生成 | SM 構造体 + `move_next` 関数 + ファクトリ関数 + スケジューラ |
+
+#### Task コンビネータ（v0.6.0）
+
+複数の `Future<T>` を同時に待機する静的メソッド群。
+
+| API | シグネチャ | 説明 |
+|-----|-----------|------|
+| `Task::when_all` | `([t1, t2, ...]: Future<T>[]) -> Future<T[]>` | 全タスク完了後に結果配列を返す（C# `Task.WhenAll` 相当） |
+| `Task::when_any` | `([t1, t2, ...]: Future<T>[]) -> Future<T>` | 最初に完了したタスクの結果を返す（C# `Task.WhenAny` 相当） |
+
+**使用例:**
+```mryl
+let t1 = fetch(1);
+let t2 = fetch(2);
+let results: i32[] = await Task::when_all([t1, t2]);  // [result1, result2]
+let first: i32     = await Task::when_any([t1, t2]);  // 最初に完了した値
+```
+
+**制限（v0.6.0）:**
+- 要素型 `T` は `void` 不可（`void` Task のコンビネータ非対応）
+- 要素型 `T` は `Result<T,E>` 不可（v0.7.0 候補 issue #XX）
+- 全要素が同一型 `T` であること（混在型不可）
 
 ### 3.6 条件付きコンパイル
 
