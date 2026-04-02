@@ -1054,6 +1054,12 @@ class Parser:
             self.advance()
             expr = self.parse_unary()
             return AwaitExpr(expr, tok.line, tok.column)
+        if tok.kind == TokenKind.WEAK:
+            self.advance()
+            self.expect(TokenKind.LPAREN)
+            expr = self.parse_expr()
+            self.expect(TokenKind.RPAREN)
+            return WeakExpr(expr, tok.line, tok.column)
         return self.parse_postfix()
 
     def parse_postfix(self):

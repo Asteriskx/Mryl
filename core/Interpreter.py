@@ -208,6 +208,14 @@ class Interpreter:
                 # Box::new(v) は EnumVariantExpr で処理されるが、
                 # FunctionCall("Box", [v]) として来る場合も対応
                 return {'__box__': True, 'value': args[0] if args else None}
+            # cancel(token) — WeakTask の asyncio.Task をキャンセルする
+            if name == "cancel":
+                token = args[0] if args else None
+                if isinstance(token, dict) and token.get('__weak_task__'):
+                    task = token.get('task')
+                    if task is not None:
+                        task.cancel()
+                return None
             raise RuntimeError(f"Undefined function: {name}")
 
         entry = self.functions[name]
@@ -483,6 +491,7 @@ class Interpreter:
             Range:           self._eval_range,
             Lambda:          self._eval_lambda,
             AwaitExpr:       self._eval_await_expr,
+            WeakExpr:        self._eval_weak_expr,
             EnumVariantExpr: self._eval_enum_variant_expr,
             MatchExpr:       self._eval_match_expr,
             BlockExpr:       self._eval_block_expr,
@@ -822,6 +831,13 @@ class Interpreter:
             'is_async': getattr(expr, 'is_async', False),
             'captured_env': captured_env,
         }
+
+    def _eval_weak_expr(self, expr: WeakExpr, env):
+        """weak(handle) — Future の asyncio.Task を弱参照として包んで返す。"""
+        future = self.eval_expr(expr.expr, env)
+        if isinstance(future, dict) and future.get('__future__'):
+            return {'__weak_task__': True, 'task': future.get('task'), 'loop': future.get('loop')}
+        raise RuntimeError("weak(): expression is not a Future")
 
     def _eval_await_expr(self, expr: AwaitExpr, env):
         future = self.eval_expr(expr.expr, env)

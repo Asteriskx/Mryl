@@ -293,6 +293,12 @@ class AwaitExpr(Expr):
         super().__init__(line, column)
         self.expr = expr       # The expression being awaited (should be an async handle)
 
+class WeakExpr(Expr):
+    """Weak expression: weak(expr) — Future<T> から WeakTask<T> を取得する"""
+    def __init__(self, expr, line=None, column=None):
+        super().__init__(line, column)
+        self.expr = expr       # Future<T> を返す式
+
 # ============================================================
 # Enum: Enumeration declaration and variant expression
 # ============================================================

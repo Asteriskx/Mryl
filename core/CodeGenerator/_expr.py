@@ -128,6 +128,10 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         if expr_class == "AwaitExpr":
             return "/* await - use let statement for typed await */"
 
+        if expr_class == "WeakExpr":
+            inner = self._generate_expr(expr.expr)
+            return f"__task_weak_retain({inner})"
+
         return "0"
 
     def _generate_expr_with_temps(self, expr, temp_string_mapping: dict) -> str:
@@ -194,6 +198,11 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         """FunctionCall を C 式文字列として返す """
         if expr.name in ["print", "println"]:
             return self._generate_print_call(expr)
+
+        # cancel(token) — WeakTask<T> をキャンセルする組み込み関数
+        if expr.name == "cancel":
+            arg = self._generate_expr(expr.args[0]) if expr.args else "NULL"
+            return f"__task_cancel({arg})"
 
         if expr.name in ("Ok", "Err"):
             val_code    = self._generate_expr(expr.args[0]) if expr.args else "0"

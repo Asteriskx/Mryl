@@ -28,6 +28,10 @@ class CodeGeneratorTypeMixin(_CodeGeneratorBase):
         if type_node.name == "Future":
             return "MrylTask*"
 
+        # WeakTask<T> は C 表現上 Future<T> と同一（MrylTask* のまま）
+        if type_node.name == "WeakTask":
+            return "MrylTask*"
+
         if type_node.name == "Box":
             # ユーザー定義 struct Box がある場合は通常の base_type として処理する
             if not self.has_user_box:

@@ -81,6 +81,9 @@ class TypeCheckerExprMixin:
         if isinstance(expr, AwaitExpr):
             return self.check_await(expr)
 
+        if isinstance(expr, WeakExpr):
+            return self.check_weak(expr)
+
         if isinstance(expr, Lambda):
             return self.check_lambda(expr)
 
@@ -253,9 +256,22 @@ class TypeCheckerExprMixin:
     def check_await(self, expr: AwaitExpr):
         """await 式の型チェック。Future<T> を T にアンラップ。"""
         handle_type = self.check_expr(expr.expr)
+        # WeakTask<T> を await しようとしたらエラー（設計規約: cancel 後は await しない）
+        if handle_type.name == "WeakTask":
+            raise TypeError_("cannot await WeakTask<T>; use Future<T> handle for await", expr)
         if handle_type.name == "Future" and handle_type.type_args:
             return handle_type.type_args[0]
         return TypeNode("void")
+
+    # ============================================
+    # WeakExpr
+    # ============================================
+    def check_weak(self, expr: WeakExpr):
+        """weak(handle) の型チェック。Future<T> → WeakTask<T>。"""
+        inner = self.check_expr(expr.expr)
+        if inner.name != "Future" or not inner.type_args:
+            raise TypeError_(f"weak() requires Future<T>, got {inner}", expr)
+        return TypeNode("WeakTask", type_args=[inner.type_args[0]])
 
     # ============================================
     # 型分類ヘルパー

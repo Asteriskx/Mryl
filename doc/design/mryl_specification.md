@@ -1,7 +1,7 @@
-﻿# Mryl プログラミング言語 - 完全仕様書
+﻿# Mryl プログラミング言語 - 言語詳細仕様書
 
 **バージョン**: 0.6.0
-**最終更新**: 2026年4月1日
+**最終更新**: 2026年4月2日
 
 ---
 
@@ -204,6 +204,9 @@ Mryl/
 | `let v: T = await h` | 完了待機 + 戻り値取得 |
 | `await h` | void 非同期の完了待機 |
 | `Future<T>` | 非同期タスクの型。C コードでは `MrylTask*` |
+| `WeakTask<T>` | Task への弱参照型。C コードでは `MrylTask*`（weak_count で管理）|
+| `weak(handle)` | `Future<T>` から `WeakTask<T>` を取得する組み込み式 |
+| `cancel(token)` | `WeakTask<T>` 経由で Task をキャンセルする組み込み関数 |
 | C コード生成 | SM 構造体 + `move_next` 関数 + ファクトリ関数 + スケジューラ |
 
 #### Task コンビネータ（v0.6.0）
@@ -227,6 +230,43 @@ let first: i32     = await Task::when_any([t1, t2]);  // 最初に完了した�
 - 要素型 `T` は `void` 不可（`void` Task のコンビネータ非対応）
 - 要素型 `T` は `Result<T,E>` 不可（v0.7.0 候補 issue #XX）
 - 全要素が同一型 `T` であること（混在型不可）
+
+#### Task キャンセル（v0.6.0）
+
+`weak(handle)` で `Future<T>` への弱参照 `WeakTask<T>` を取得し、`cancel(token)` でキャンセルする。
+
+```mryl
+async fn long_task(n: i32) -> i32 { return n * 2; }
+
+fn main() {
+    let handle = long_task(42);
+    let token: WeakTask<i32> = weak(handle);  // 弱参照取得
+
+    cancel(token);  // Task をキャンセル（handle は await しない）
+}
+```
+
+**設計規約:**
+- キャンセルは「Task を捨てる」操作。キャンセル後は `handle` を `await` しない
+- `cancel()` は冪等（完了済み・キャンセル済みの Task に対して何もしない）
+- `WeakTask<T>` は `await` 不可（TypeChecker でエラー）
+
+**タイムアウトパターン（`when_any` との組み合わせ）:**
+```mryl
+let handle = long_process();
+let timer  = delay(5000);
+let tok_h: WeakTask<i32> = weak(handle);
+
+let _: i32 = await Task::when_any([handle, timer]);
+cancel(tok_h);  // タイムアウトした場合に handle をキャンセル
+```
+
+**C コード生成:**
+| Mryl 構文 | 生成 C コード |
+|-----------|-------------|
+| `weak(handle)` | `__task_weak_retain(handle)` |
+| `cancel(token)` | `__task_cancel(token)` |
+| `WeakTask<T>` 型 | `MrylTask*` |
 
 ### 3.6 条件付きコンパイル
 
@@ -1311,7 +1351,19 @@ int main(void) {
 
 ### キャンセル
 
+Mryl 構文の `weak(handle)` / `cancel(token)` が以下の C コードに対応します。
+
+```mryl
+let token: WeakTask<i32> = weak(handle);  // → __task_weak_retain(handle)
+cancel(token);                             // → __task_cancel(token)
+```
+
 ```c
+static inline MrylTask* __task_weak_retain(MrylTask* t) {
+    if (t) t->weak_count++;
+    return t;
+}
+
 static inline void __task_cancel(MrylTask* t) {
     if (!t) return;
     if (t->state == MRYL_TASK_PENDING || t->state == MRYL_TASK_RUNNING) {
@@ -1322,7 +1374,8 @@ static inline void __task_cancel(MrylTask* t) {
 }
 ```
 
-awaiter は `MRYL_TASK_CANCELLED` を確認して結果をデフォルト値（`0` / `NULL`）とします。
+awaiter は `MRYL_TASK_CANCELLED` を確認して結果をデフォルト値（`0` / `NULL`）とします。  
+設計規約として、キャンセルした Task は `await` しません。
 
 ### 実装詳細
 

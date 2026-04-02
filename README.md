@@ -880,6 +880,31 @@ fn main() {
 
 ---
 
+### Task キャンセル（v0.6.0）
+
+`weak(handle)` で弱参照 `WeakTask<T>` を取得し、`cancel(token)` でキャンセルします。
+
+| API | 説明 |
+|-----|------|
+| `weak(handle: Future<T>)` | 弱参照 `WeakTask<T>` を取得（`__task_weak_retain` に対応） |
+| `cancel(token: WeakTask<T>)` | Task をキャンセル（冪等・完了済みなら何もしない） |
+
+```mryl
+async fn long_task(n: i32) -> i32 { return n * 2; }
+
+fn main() {
+    let handle = long_task(42);
+    let token: WeakTask<i32> = weak(handle);  // 弱参照取得
+
+    cancel(token);  // キャンセル（handle は await しない）
+}
+```
+
+**設計規約**: キャンセルは「Task を捨てる」操作。キャンセル後に `handle` を `await` しない。  
+`WeakTask<T>` を `await` しようとすると TypeChecker がエラーを出します。
+
+---
+
 ### アーキテクチャ概要
 
 Mryl の async/await は **C# 風の状態機械 + シングルスレッドスケジューラ** で実装されています。
@@ -984,8 +1009,9 @@ await がある場合、状態番号が増えて中断点を記録します（`m
 ### キャンセル
 
 ```mryl
-// （将来仕様 - 現在は予約）
-cancel(handle);   // weak ref 経由でキャンセル
+let handle = long_task(42);
+let token: WeakTask<i32> = weak(handle);  // 弱参照取得
+cancel(token);                             // キャンセル（handle は await しない）
 ```
 
 `__task_cancel()` を呼ぶと `state = MRYL_TASK_CANCELLED` になり、  
@@ -2038,6 +2064,7 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_38_async_result.ml](../tests/test_38_async_result.ml) | `async fn` + `Result<T,E>` FAULTED 状態伝播（#51） | ✅ Python + C + Native |
 | [tests/test_42_iter_lambda_param_count.ml](../tests/test_42_iter_lambda_param_count.ml) | `Iter<T>` ラムダ引数数チェック（#69、C0） | ✅ Python + C + Native |
 | [tests/test_43_task_when_all_any.ml](../tests/test_43_task_when_all_any.ml) | `Task::when_all` / `Task::when_any` コンビネータ（#61、C0/C1） | ✅ Python + C + Native |
+| [tests/test_44_async_cancel.ml](../tests/test_44_async_cancel.ml) | `weak` / `cancel` Task キャンセル機構（#52、C0/C1） | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 

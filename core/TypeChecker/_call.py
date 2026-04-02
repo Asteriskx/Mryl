@@ -200,6 +200,15 @@ class TypeCheckerCallMixin:
     # FunctionCall（ジェネリクス解決含む）
     # ============================================
     def check_call(self, expr: FunctionCall):
+        # cancel(token) — 組み込み関数: WeakTask<T> を受け取り void を返す
+        if expr.name == "cancel":
+            if len(expr.args) != 1:
+                raise TypeError_("cancel() requires exactly 1 argument", expr)
+            arg_type = self.check_expr(expr.args[0])
+            if arg_type.name != "WeakTask":
+                raise TypeError_(f"cancel() requires WeakTask<T>, got {arg_type}", expr.args[0])
+            return TypeNode("void")
+
         # ラムダ変数 / fn型パラメータへの呼び出し (#41)
         for scope in reversed(self.env):
             if expr.name in scope:
