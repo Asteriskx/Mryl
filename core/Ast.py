@@ -321,12 +321,13 @@ class EnumVariantExpr(Expr):
     Also used for static method call/reference: TypeName::method(args)  or  TypeName::method
     has_parens=True means () was explicitly written (call site), False means no parentheses (reference).
     """
-    def __init__(self, enum_name, variant_name, args=None, line=None, column=None, has_parens=False):
+    def __init__(self, enum_name, variant_name, args=None, line=None, column=None, has_parens=False, type_args=None):
         super().__init__(line, column)
         self.enum_name = enum_name
         self.variant_name = variant_name
         self.args = args or []       # list of Expr (one per payload field)
         self.has_parens = has_parens # True if () was written (call), False if no parens (reference)
+        self.type_args = type_args or []  # generic type args e.g. Subject<i32>::new() → ['i32']
 
 # ============================================================
 # Match: match expression nodes

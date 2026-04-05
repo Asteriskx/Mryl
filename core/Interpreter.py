@@ -855,6 +855,18 @@ class Interpreter:
         raise RuntimeError("await: expression is not a Future")
 
     def _eval_enum_variant_expr(self, expr: EnumVariantExpr, env):
+        # Subject<T>::new() — 購読者リストを持つ dict として生成
+        if expr.enum_name == "Subject" and expr.variant_name == "new" \
+                and "Subject" not in self.structs:
+            T = getattr(expr, '_subject_elem_type', 'i32')
+            return {
+                '__subject__': True,
+                'elem_type': T,
+                'subscribers': [],
+                'completed': False,
+                'errored': False,
+            }
+
         # Task::when_all / Task::when_any — ユーザー定義 struct Task がない場合のみ
         if expr.enum_name == "Task" and expr.variant_name in ("when_all", "when_any") \
                 and "Task" not in self.structs:
@@ -1217,10 +1229,173 @@ class Interpreter:
                 return obj['value']
             raise RuntimeError(f"Unknown Box method: {expr.method}")
 
+        if isinstance(obj, dict) and '__subject__' in obj:
+            return self._eval_subject_method(obj, expr.method, args_eval, expr, env)
+
+        if isinstance(obj, dict) and '__subscription__' in obj:
+            if expr.method == 'unsubscribe':
+                obj['handler']['active'] = False
+                return None
+            raise RuntimeError(f"Unknown Subscription method: {expr.method}")
+
         if isinstance(obj, dict) and '__struct_name__' in obj:
             return self._eval_struct_method(obj, expr.method, args_eval)
 
         raise RuntimeError(f"Cannot call method on non-struct value")
+
+    def _eval_subject_method(self, obj: dict, method: str, args_eval: list, expr, env):
+        """Subject<T> / Observable<T> のメソッド評価。
+        オペレータ（filter/map/take/skip/merge）は上流に subscribe 登録した新 Subject を返す。
+        C# Rx.NET の IObservable パイプライン方式に準じた設計。
+        """
+
+        def _call_fn(fn_val, *a):
+            """ラムダ / 関数ポインタを呼び出すヘルパー。"""
+            if isinstance(fn_val, dict) and 'params' in fn_val:
+                return self.call_lambda(fn_val, list(a))
+            if callable(fn_val):
+                return fn_val(*a)
+            return None
+
+        def _emit_to(subject, val):
+            """subject の全 active 購読者に値を送る。"""
+            if subject.get('completed') or subject.get('errored'):
+                return
+            for h in list(subject['subscribers']):
+                if h.get('active') and h.get('on_next'):
+                    _call_fn(h['on_next'], val)
+
+        def _subscribe_raw(source, on_next=None, on_error=None, on_complete=None):
+            """source に購読者を登録し Subscription dict を返す。"""
+            handler = {
+                'active': True,
+                'on_next': on_next,
+                'on_error': on_error,
+                'on_complete': on_complete,
+            }
+            source['subscribers'].append(handler)
+            return {'__subscription__': True, 'source': source, 'handler': handler}
+
+        if method == 'emit':
+            _emit_to(obj, args_eval[0])
+            return None
+
+        if method == 'complete':
+            obj['completed'] = True
+            for h in list(obj['subscribers']):
+                if h.get('active') and h.get('on_complete'):
+                    _call_fn(h['on_complete'])
+            return None
+
+        if method == 'error':
+            obj['errored'] = True
+            msg = args_eval[0] if args_eval else ""
+            for h in list(obj['subscribers']):
+                if h.get('active') and h.get('on_error'):
+                    _call_fn(h['on_error'], msg)
+            return None
+
+        if method == 'filter':
+            pred = args_eval[0]
+            downstream = {
+                '__subject__': True,
+                'elem_type': obj.get('elem_type', 'i32'),
+                'subscribers': [],
+                'completed': False,
+                'errored': False,
+            }
+            # 上流に subscribe 登録：pred が True の値だけ downstream へ流す
+            def _on_next_filter(val, _pred=pred, _ds=downstream):
+                if _call_fn(_pred, val):
+                    _emit_to(_ds, val)
+            _subscribe_raw(obj, on_next=_on_next_filter)
+            return downstream
+
+        if method == 'map':
+            fn = args_eval[0]
+            downstream = {
+                '__subject__': True,
+                'elem_type': 'mapped',
+                'subscribers': [],
+                'completed': False,
+                'errored': False,
+            }
+            def _on_next_map(val, _fn=fn, _ds=downstream):
+                _emit_to(_ds, _call_fn(_fn, val))
+            _subscribe_raw(obj, on_next=_on_next_map)
+            return downstream
+
+        if method == 'take':
+            n = int(args_eval[0])
+            state = {'count': 0}
+            downstream = {
+                '__subject__': True,
+                'elem_type': obj.get('elem_type', 'i32'),
+                'subscribers': [],
+                'completed': False,
+                'errored': False,
+            }
+            def _on_next_take(val, _n=n, _st=state, _ds=downstream):
+                if _st['count'] < _n:
+                    _emit_to(_ds, val)
+                    _st['count'] += 1
+                    if _st['count'] >= _n:
+                        _ds['completed'] = True
+                        for h in list(_ds['subscribers']):
+                            if h.get('active') and h.get('on_complete'):
+                                _call_fn(h['on_complete'])
+            _subscribe_raw(obj, on_next=_on_next_take)
+            return downstream
+
+        if method == 'skip':
+            n = int(args_eval[0])
+            state = {'count': 0}
+            downstream = {
+                '__subject__': True,
+                'elem_type': obj.get('elem_type', 'i32'),
+                'subscribers': [],
+                'completed': False,
+                'errored': False,
+            }
+            def _on_next_skip(val, _n=n, _st=state, _ds=downstream):
+                if _st['count'] < _n:
+                    _st['count'] += 1
+                else:
+                    _emit_to(_ds, val)
+            _subscribe_raw(obj, on_next=_on_next_skip)
+            return downstream
+
+        if method == 'merge':
+            other = args_eval[0]  # Observable dict
+            downstream = {
+                '__subject__': True,
+                'elem_type': obj.get('elem_type', 'i32'),
+                'subscribers': [],
+                'completed': False,
+                'errored': False,
+            }
+            # 両ソースの complete を追跡してダウンストリームに伝播
+            state = {'done': 0}
+            def _on_complete_merge(_st=state, _ds=downstream):
+                _st['done'] += 1
+                if _st['done'] >= 2:
+                    _ds['completed'] = True
+                    for h in list(_ds['subscribers']):
+                        if h.get('active') and h.get('on_complete'):
+                            _call_fn(h['on_complete'])
+            def _on_next_merge(val, _ds=downstream):
+                _emit_to(_ds, val)
+            _subscribe_raw(obj,   on_next=_on_next_merge, on_complete=_on_complete_merge)
+            _subscribe_raw(other, on_next=_on_next_merge, on_complete=_on_complete_merge)
+            return downstream
+
+        if method == 'subscribe':
+            on_next     = args_eval[0] if len(args_eval) >= 1 else None
+            on_error    = args_eval[1] if len(args_eval) >= 2 else None
+            on_complete = args_eval[2] if len(args_eval) >= 3 else None
+            return _subscribe_raw(obj, on_next=on_next, on_error=on_error, on_complete=on_complete)
+
+        raise RuntimeError(f"Subject/Observable has no method '{method}'")
 
     def _eval_array_method(self, obj: list, method: str, args_eval: list):
         """動的配列（Python list）のメソッドを処理する。"""

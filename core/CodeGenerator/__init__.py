@@ -205,6 +205,10 @@ class CodeGenerator(
         combinator_types = self._collect_combinator_types(program)
         self._emit_combinator_helpers(combinator_types)
 
+        # Observable / Subject ヘルパー
+        subject_types = self._collect_subject_types(program)
+        self._emit_subject_helpers(subject_types)
+
         # 構造体メソッドの出力
         for struct in program.structs:
             if not struct.methods:
@@ -273,15 +277,16 @@ class CodeGenerator(
                         lambda_lines.append(f"    {cap_c_type} {cap_name};")
                     lambda_lines.append(f"}} {env_struct};")
                     # fat pointer 規約: void* __e を最終引数、body 先頭でキャスト
+                    # params_str が "void" の場合は "void, void* __e" にならないよう注意
                     full_params = (
-                        f"{params_str}, void* __e" if params_str else "void* __e"
+                        f"{params_str}, void* __e" if (params_str and params_str != "void") else "void* __e"
                     )
                     lambda_lines.append(f"static {ret_type} {lam_name}({full_params}) {{")
                     lambda_lines.append(f"    {env_struct}* __env = ({env_struct}*)__e;")
                 else:
                     # キャプチャなし: uniform convention のため void* __e を付与
                     full_params = (
-                        f"{params_str}, void* __e" if params_str else "void* __e"
+                        f"{params_str}, void* __e" if (params_str and params_str != "void") else "void* __e"
                     )
                     lambda_lines.append(f"static {ret_type} {lam_name}({full_params}) {{")
                 lambda_lines.extend(body_lines)
@@ -425,15 +430,16 @@ class CodeGenerator(
                     lambda_lines.append(f"    {cap_c_type} {cap_name};")
                 lambda_lines.append(f"}} {env_struct};")
                 # fat pointer 規約: void* __e を最終引数、body 先頭でキャスト
+                # params_str が "void" の場合は "void, void* __e" にならないよう注意
                 full_params = (
-                    f"{params_str}, void* __e" if params_str else "void* __e"
+                    f"{params_str}, void* __e" if (params_str and params_str != "void") else "void* __e"
                 )
                 lambda_lines.append(f"static {ret_type} {lam_name}({full_params}) {{")
                 lambda_lines.append(f"    {env_struct}* __env = ({env_struct}*)__e;")
             else:
                 # キャプチャなし: uniform convention のため void* __e を付与
                 full_params = (
-                    f"{params_str}, void* __e" if params_str else "void* __e"
+                    f"{params_str}, void* __e" if (params_str and params_str != "void") else "void* __e"
                 )
                 lambda_lines.append(f"static {ret_type} {lam_name}({full_params}) {{")
             lambda_lines.extend(body_lines)

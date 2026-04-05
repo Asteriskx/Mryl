@@ -157,6 +157,16 @@ class TypeCheckerCallMixin:
                 return TypeNode("i32")
             raise TypeError_(f"Result has no method '{expr.method}'", expr)
 
+        # Subject<T> / Observable<T> のメソッド
+        if obj_type.name in ("Subject", "Observable"):
+            return self._check_observable_method(expr, obj_type)
+
+        # Subscription のメソッド
+        if obj_type.name == "Subscription":
+            if expr.method == "unsubscribe":
+                return TypeNode("void")
+            raise TypeError_(f"Subscription has no method '{expr.method}'", expr)
+
         # 構造体のメソッド
         struct = self.structs.get(obj_type.name)
         if not struct:
@@ -443,3 +453,84 @@ class TypeCheckerCallMixin:
             return TypeNode('bool')
 
         raise TypeError_(f"Unknown iter method '{method}'", expr)
+
+    # ============================================
+    # Subject<T> / Observable<T> メソッドの型検査
+    # ============================================
+    def _check_observable_method(self, expr: MethodCall, obj_type: 'TypeNode'):
+        """Subject<T> / Observable<T> のメソッド呼び出しの戻り値型を返す。"""
+        method = expr.method
+        # T を取得
+        T = obj_type.type_args[0] if obj_type.type_args else TypeNode("void")
+        T = T if isinstance(T, TypeNode) else TypeNode(T)
+
+        # emit(v: T) → void
+        if method == "emit":
+            if len(expr.args) != 1:
+                raise TypeError_("emit() requires exactly 1 argument", expr)
+            self.check_expr(expr.args[0])
+            return TypeNode("void")
+
+        # complete() → void
+        if method == "complete":
+            return TypeNode("void")
+
+        # error(msg: string) → void
+        if method == "error":
+            if len(expr.args) != 1:
+                raise TypeError_("error() requires exactly 1 string argument", expr)
+            return TypeNode("void")
+
+        # filter(fn(T)->bool) → Observable<T>
+        if method == "filter":
+            if len(expr.args) != 1:
+                raise TypeError_("filter() requires a predicate function", expr)
+            self.check_expr(expr.args[0])
+            return TypeNode("Observable", type_args=[T])
+
+        # map(fn(T)->U) → Observable<U>
+        if method == "map":
+            if len(expr.args) != 1:
+                raise TypeError_("map() requires a transform function", expr)
+            fn_type = self.check_expr(expr.args[0])
+            # 戻り値型 U を fn type_args の最後から取得
+            if isinstance(fn_type, TypeNode) and fn_type.name == "fn" and fn_type.type_args:
+                U = fn_type.type_args[-1]
+                U = U if isinstance(U, TypeNode) else TypeNode(U)
+            else:
+                U = TypeNode("void")
+            return TypeNode("Observable", type_args=[U])
+
+        # take(n: i32) → Observable<T>
+        if method == "take":
+            if len(expr.args) != 1:
+                raise TypeError_("take() requires an i32 argument", expr)
+            self.check_expr(expr.args[0])
+            return TypeNode("Observable", type_args=[T])
+
+        # skip(n: i32) → Observable<T>
+        if method == "skip":
+            if len(expr.args) != 1:
+                raise TypeError_("skip() requires an i32 argument", expr)
+            self.check_expr(expr.args[0])
+            return TypeNode("Observable", type_args=[T])
+
+        # merge(other: Observable<T>) → Observable<T>
+        if method == "merge":
+            if len(expr.args) != 1:
+                raise TypeError_("merge() requires an Observable<T> argument", expr)
+            other_type = self.check_expr(expr.args[0])
+            if other_type.name not in ("Subject", "Observable"):
+                raise TypeError_(f"merge() requires Observable<T>, got {other_type}", expr.args[0])
+            return TypeNode("Observable", type_args=[T])
+
+        # subscribe(fn(T)->void) → Subscription
+        # subscribe(fn(T)->void, fn(string)->void, fn()->void) → Subscription
+        if method == "subscribe":
+            if len(expr.args) not in (1, 3):
+                raise TypeError_("subscribe() requires 1 or 3 arguments", expr)
+            for arg in expr.args:
+                self.check_expr(arg)
+            return TypeNode("Subscription")
+
+        raise TypeError_(f"Subject/Observable has no method '{method}'", expr)

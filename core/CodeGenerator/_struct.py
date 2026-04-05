@@ -157,6 +157,17 @@ class CodeGeneratorStructMixin(_CodeGeneratorBase):
             # C99 複合リテラルでタスク配列を渡す
             return f"{fac}((MrylTask*[{count}]){{{elem_strs}}}, {count})"
 
+        # Subject<T>::new() → mryl_subject_T_new()
+        # ユーザー定義 struct Subject がある場合は通常の static fn として処理する
+        if type_name == "Subject" and member_name == "new" \
+                and not any(s.name == "Subject" for s in self.structs):
+            T_name = getattr(expr, '_subject_elem_type', None)
+            if T_name is None and expr.type_args:
+                arg = expr.type_args[0]
+                T_name = arg.name if hasattr(arg, 'name') else str(arg)
+            T_name = T_name or "i32"
+            return f"mryl_subject_{T_name}_new()"
+
         # Box::new(v) → GCC statement expression: ({T* __p = malloc(sizeof(T)); *__p = v; __p;})
         # ユーザー定義 struct Box がある場合は通常の static fn として処理する
         if type_name == "Box" and member_name == "new" and expr.args and not self.has_user_box:

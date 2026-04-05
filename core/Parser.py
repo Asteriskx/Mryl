@@ -1308,9 +1308,9 @@ class Parser:
             return ArrayAccess(VarRef(ident, line, col), index, line, col)
 
         # Struct initialization (identifier is a type name if starts with uppercase)
+        # type_params はジェネリック型引数（Subject<i32>::new() 等でも使用）
+        type_params = []
         if ident[0].isupper():
-            # Generic struct: Box<i32> { ... } or Pair<i32, string> { ... }
-            type_params = []
             if self.current.kind == TokenKind.LT:
                 saved_pos = self.pos
                 # Speculatively parse <T, U, ...>
@@ -1323,9 +1323,9 @@ class Parser:
                         if not self.match(TokenKind.COMMA):
                             break
                     self.expect(TokenKind.GT)
-                    # Only commit if followed by {
-                    if self.current.kind != TokenKind.LBRACE:
-                        # Not a struct init, roll back
+                    # Commit if followed by { (struct init) or :: (TypeName<T>::method())
+                    if self.current.kind not in (TokenKind.LBRACE, TokenKind.DOUBLE_COLON):
+                        # Not a struct init or generic static call, roll back
                         self.pos = saved_pos
                         self.current = self.tokens[self.pos]
                         type_params = []
@@ -1348,6 +1348,7 @@ class Parser:
                 return StructInit(ident, type_params, fields, line, col)
 
         # Enum variant / Static method: TypeName::member  or  TypeName::member(args)
+        # TypeName<T>::member(args) も type_params がセットされた状態でここに来る
         if self.current.kind == TokenKind.DOUBLE_COLON:
             self.advance()  # consume ::
             variant_name = self.current.value
@@ -1358,7 +1359,8 @@ class Parser:
                 has_parens = True
                 args = self.parse_args()
                 self.expect(TokenKind.RPAREN)
-            return EnumVariantExpr(ident, variant_name, args, line, col, has_parens=has_parens)
+            return EnumVariantExpr(ident, variant_name, args, line, col,
+                                   has_parens=has_parens, type_args=type_params)
 
         return VarRef(ident, line, col)
 

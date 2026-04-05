@@ -119,6 +119,17 @@ class TypeCheckerExprMixin:
                     # Future<T>
                     return TypeNode("Future", type_args=[T])
 
+            # Subject<T>::new() — Subject<T> を返す（ユーザー定義 struct Subject がない場合のみ）
+            if expr.enum_name == "Subject" and expr.variant_name == "new" \
+                    and not self.structs.get("Subject"):
+                # 型引数 T を取得（Subject<i32>::new() の i32 部分）
+                if not expr.type_args:
+                    raise TypeError_("Subject::new() requires a type argument, e.g. Subject<i32>::new()", expr)
+                T = expr.type_args[0] if isinstance(expr.type_args[0], TypeNode) else TypeNode(expr.type_args[0])
+                # AST ノードに型引数を付与（CodeGenerator で使用）
+                expr._subject_elem_type = T.name
+                return TypeNode("Subject", type_args=[T])
+
             # Box::new(v) — Box<T> を返す（ユーザー定義 struct Box がない場合のみ）
             if expr.enum_name == "Box" and expr.variant_name == "new" and expr.args \
                     and not self.structs.get("Box"):

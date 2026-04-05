@@ -776,11 +776,95 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                 return f"mryl_str_split({obj_code}, {arg})"
 
 
+        # Subject<T> / Observable<T> のメソッド
+        # env には Mryl 型名 "Subject_T" / "Observable_T" で登録されるため両方判定する
+        if (obj_type.startswith("MrylSubject_") or
+                obj_type.startswith("Subject_") or
+                obj_type.startswith("Observable_")):
+            if obj_type.startswith("MrylSubject_"):
+                T = obj_type[len("MrylSubject_"):].rstrip("*").strip()
+            elif obj_type.startswith("Subject_"):
+                T = obj_type[len("Subject_"):]
+            else:
+                T = obj_type[len("Observable_"):]
+            obj_code = self._generate_expr(expr.obj)
+            return self._generate_subject_method(expr, T, obj_code)
+
+        # Subscription の unsubscribe（void* または Mryl 型名 "Subscription" の両方に対応）
+        if obj_type in ("void*", "Subscription"):
+            obj_code = self._generate_expr(expr.obj)
+            if expr.method == "unsubscribe":
+                # MrylSubscriptionBase* にキャスト → active = 0（型非依存の汎用版）
+                return f"mryl_subscription_unsubscribe({obj_code})"
+
         obj         = self._generate_expr(expr.obj)
         args_list   = [self._generate_expr(arg) for arg in expr.args]
         struct_name = obj_type   # Bug#27: obj の型から struct 名を解決
         all_args    = [f"&{obj}"] + args_list   # Bug#28: ポインタ渡し
         return f"{struct_name}_{expr.method}({', '.join(all_args)})"
+
+    def _generate_subject_method(self, expr, T: str, obj_code: str) -> str:
+        """Subject<T> / Observable<T> のメソッド呼び出しを C 式文字列として生成する。
+        オペレータ（filter/map/take/skip/merge）は新しい Subject を生成して
+        上流に subscribe 登録するパイプライン方式（C# Rx.NET 準拠）。
+        """
+        method = expr.method
+
+        if method == "emit":
+            val = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_emit({obj_code}, {val})"
+
+        if method == "complete":
+            return f"mryl_subject_{T}_complete({obj_code})"
+
+        if method == "error":
+            msg = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_error({obj_code}, {msg})"
+
+        if method == "subscribe":
+            # subscribe(on_next) or subscribe(on_next, on_error, on_complete)
+            # ラムダ関数は uniform convention で void* __e を最終引数に持つため
+            # MrylOnNext_T / MrylOnError_T / MrylOnComplete_T へキャストして直接渡す。
+            on_next     = self._generate_expr(expr.args[0]) if len(expr.args) >= 1 else "NULL"
+            on_error    = self._generate_expr(expr.args[1]) if len(expr.args) >= 2 else "NULL"
+            on_complete = self._generate_expr(expr.args[2]) if len(expr.args) >= 3 else "NULL"
+            ct = self._type_to_c_base(T)
+            on_next_cast     = f"(MrylOnNext_{T}){on_next}"     if on_next     != "NULL" else "NULL"
+            on_error_cast    = f"(MrylOnError_{T}){on_error}"   if on_error    != "NULL" else "NULL"
+            on_complete_cast = f"(MrylOnComplete_{T}){on_complete}" if on_complete != "NULL" else "NULL"
+            return (
+                f"mryl_subject_{T}_subscribe({obj_code}, "
+                f"{on_next_cast}, {on_error_cast}, {on_complete_cast}, NULL)"
+            )
+
+        if method == "unsubscribe":
+            return f"mryl_subscription_{T}_unsubscribe((MrylSubscription_{T}*){obj_code})"
+
+        # オペレータ（filter/map/take/skip/merge）: ヘッダ生成の mryl_subject_T_op() を呼ぶ
+        ct = self._type_to_c_base(T)
+        if method == "filter":
+            pred = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_filter({obj_code}, (int (*)({ct}, void*)){pred}, NULL)"
+
+        if method == "map":
+            mapper = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_map({obj_code}, ({ct} (*)({ct}, void*)){mapper}, NULL)"
+
+        if method == "take":
+            n = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_take({obj_code}, {n})"
+
+        if method == "skip":
+            n = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_skip({obj_code}, {n})"
+
+        if method == "merge":
+            other = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_merge({obj_code}, {other})"
+
+        # フォールバック（未対応メソッド）
+        args = ", ".join(self._generate_expr(a) for a in expr.args)
+        return f"/* Observable.{method}({args}) - not implemented */"
 
     def _generate_iter_method(
         self, expr, et: str, obj_c: str, src_is_temp: bool = False

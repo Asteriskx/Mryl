@@ -23,24 +23,25 @@
 11. [関数](#関数)
 12. [ラムダ式](#ラムダ式)
 13. [async / await](#async--await)
-14. [ジェネリック](#ジェネリック)
-15. [構造体](#構造体)
-16. [static fn（静的メソッド）](#static-fn静的メソッド)
-17. [enum（列挙型）](#enum列挙型)
-18. [match 式](#match-式)
-19. [Result 型とエラーハンドリング](#result-型とエラーハンドリング)
-20. [Option 型](#option-型)
-21. [Box 型（ヒープポインタ）](#box-型ヒープポインタ)
-22. [配列（固定長）](#配列固定長)
-23. [可変長配列（T[]）](#可変長配列t)
-24. [組み込み関数](#組み込み関数)
-25. [string 組み込みメソッド](#string-組み込みメソッド)
-26. [Iter\<T\> / LINQ スタイルコレクション操作](#itert--linq-スタイルコレクション操作)
-27. [型推論](#型推論)
-28. [型チェック](#型チェック)
-29. [まとめ](#まとめ)
-30. [テストファイル](#テストファイル)
-31. [トラブルシューティング](#トラブルシューティング)
+14. [Observable\<T\> / Subject\<T\>（リアクティブストリーム）](#observablet--subjecttリアクティブストリーム)
+15. [ジェネリック](#ジェネリック)
+16. [構造体](#構造体)
+17. [static fn（静的メソッド）](#static-fn静的メソッド)
+18. [enum（列挙型）](#enum列挙型)
+19. [match 式](#match-式)
+20. [Result 型とエラーハンドリング](#result-型とエラーハンドリング)
+21. [Option 型](#option-型)
+22. [Box 型（ヒープポインタ）](#box-型ヒープポインタ)
+23. [配列（固定長）](#配列固定長)
+24. [可変長配列（T[]）](#可変長配列t)
+25. [組み込み関数](#組み込み関数)
+26. [string 組み込みメソッド](#string-組み込みメソッド)
+27. [Iter\<T\> / LINQ スタイルコレクション操作](#itert--linq-スタイルコレクション操作)
+28. [型推論](#型推論)
+29. [型チェック](#型チェック)
+30. [まとめ](#まとめ)
+31. [テストファイル](#テストファイル)
+32. [トラブルシューティング](#トラブルシューティング)
 
 ---
 
@@ -1032,6 +1033,141 @@ awaiter が存在すれば自動的に再スケジュールされます。
 
 ---
 
+## Observable\<T\> / Subject\<T\>（リアクティブストリーム）
+
+**v0.6.0 追加。C# Rx.NET と同じパイプライン設計**のリアクティブストリームです。  
+`Subject<T>` がイベントの発信源、`Observable<T>` がパイプライン（フィルタ・変換後のストリーム）を表します。
+
+### 基本的な使い方
+
+```mryl
+fn main() {
+    let s: Subject<i32> = Subject<i32>::new();
+
+    // subscribe: イベントを受信するコールバックを登録
+    let sub: Subscription = s.subscribe((x: i32) => {
+        println("received: {}", x);
+    });
+
+    s.emit(1);   // received: 1
+    s.emit(2);   // received: 2
+
+    sub.unsubscribe();  // 購読解除後は on_next が呼ばれない
+    s.emit(3);   // 無視される
+}
+```
+
+### オペレータ（パイプライン）
+
+`filter` / `map` / `take` / `skip` / `merge` でストリームを変換できます。  
+各オペレータは新しい `Observable<T>` を返し、**チェーン可能**です。
+
+```mryl
+fn main() {
+    let s: Subject<i32> = Subject<i32>::new();
+
+    // filter + map チェーン
+    let obs: Observable<i32> = s
+        .filter((x: i32) => { return x > 0; })
+        .map((x: i32) => { return x * 10; });
+
+    let sub: Subscription = obs.subscribe((x: i32) => {
+        println("H: {}", x);
+    });
+
+    s.emit(-1);  // スキップ
+    s.emit(2);   // H: 20
+    s.emit(4);   // H: 40
+    sub.unsubscribe();
+}
+```
+
+### complete / error ハンドラ
+
+```mryl
+fn main() {
+    let s: Subject<i32> = Subject<i32>::new();
+    let sub: Subscription = s.subscribe(
+        (x: i32)     => { println("next: {}", x); },
+        (e: string)  => { println("error: {}", e); },
+        ()           => { println("complete"); }
+    );
+    s.emit(1);         // next: 1
+    s.complete();      // complete（以降の emit は無視）
+    s.emit(2);         // 無視
+    sub.unsubscribe();
+}
+```
+
+### merge（2 ソース合流）
+
+```mryl
+fn main() {
+    let s1: Subject<i32> = Subject<i32>::new();
+    let s2: Subject<i32> = Subject<i32>::new();
+    let merged: Observable<i32> = s1.merge(s2);
+    let sub: Subscription = merged.subscribe((x: i32) => {
+        println("I: {}", x);
+    });
+    s1.emit(1);  // I: 1
+    s2.emit(2);  // I: 2
+    s1.emit(3);  // I: 3
+    sub.unsubscribe();
+}
+```
+
+### API 一覧
+
+#### Subject\<T\> — 発信源
+
+| メソッド | 説明 |
+|---------|------|
+| `Subject<T>::new()` | 新しい Subject を作成 |
+| `s.emit(val: T)` | 購読者全員に値を送信（complete/error 済みの場合は無視） |
+| `s.complete()` | ストリーム完了を通知（以降の emit を無視） |
+| `s.error(msg: string)` | エラーを通知（以降の emit を無視） |
+| `s.subscribe(on_next)` | コールバックを登録し `Subscription` を返す |
+| `s.subscribe(on_next, on_error, on_complete)` | 3 ハンドラ版 |
+| `s.filter(pred)` | 述語を満たす値のみ通過する `Observable<T>` を返す |
+| `s.map(mapper)` | 変換した値を流す `Observable<T>` を返す |
+| `s.take(n)` | 先頭 n 件のみ通過する `Observable<T>` を返す |
+| `s.skip(n)` | 先頭 n 件をスキップする `Observable<T>` を返す |
+| `s.merge(other)` | 2 つのソースを合流する `Observable<T>` を返す |
+
+#### Observable\<T\> — パイプライン
+
+Subject と同じオペレータ（`filter` / `map` / `take` / `skip` / `merge` / `subscribe`）を使用できます。
+
+#### Subscription — 購読管理
+
+| メソッド | 説明 |
+|---------|------|
+| `sub.unsubscribe()` | 購読を解除（以降の on_next が呼ばれなくなる） |
+
+### サポートする型
+
+`Subject<T>` の型パラメータ `T` には以下が使用できます：
+
+| 型 | 例 |
+|----|----|
+| 数値型 | `Subject<i32>`, `Subject<f64>` |
+| string | `Subject<string>` |
+| ユーザー定義 struct | `Subject<Point>` |
+
+### C コード生成
+
+`Subject<T>` はモノモーフ化方式で型ごとに展開されます：
+
+```c
+// Subject<i32> の場合
+MrylSubject_i32* s = mryl_subject_i32_new();
+mryl_subject_i32_emit(s, 42);
+void* sub = mryl_subject_i32_subscribe(s, on_next_fn, NULL, NULL, NULL);
+mryl_subscription_unsubscribe(sub);
+```
+
+---
+
 ## ジェネリック
 
 ### 単一型パラメータ
@@ -2014,6 +2150,7 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 ✓ **Iter\<T\> / LINQ**（`filter` / `select` / `take` / `skip` / `to_array` / `aggregate` / `for_each` / `count` / `first` / `any` / `all` / `select_many`）  
 ✓ **ユーザー入力**（`read_line()` / `parse_int()` / `parse_f64()`（`Result<T, string>` 返し）/ `checked_div()`）  
 ✓ **async / await**（状態機械 + シングルスレッドスケジューラ、`-lpthread` 不要）  
+✓ **Observable\<T\> / Subject\<T\>**（リアクティブストリーム、filter / map / take / skip / merge）  
 ✓ Python インタプリタ + C コードジェネレータの二重実行エンジン  
 
 学習用言語としても、趣味の言語としても十分な完成度を持っています。
@@ -2062,9 +2199,13 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_36_for_each_void_stmt.ml](../tests/test_36_for_each_void_stmt.ml) | `for_each` void 文式・キャプチャあり fat pointer ラムダ（#64） | ✅ Python + C + Native |
 | [tests/test_37_iter_lambda_typecheck.ml](../tests/test_37_iter_lambda_typecheck.ml) | `Iter<T>` メソッドへのラムダ引数型検査（#63、C0/C1/MC/DC） | ✅ Python + C + Native |
 | [tests/test_38_async_result.ml](../tests/test_38_async_result.ml) | `async fn` + `Result<T,E>` FAULTED 状態伝播（#51） | ✅ Python + C + Native |
+| [tests/test_39_toarray_free.ml](../tests/test_39_toarray_free.ml) | `to_array()` 結果 MrylVec の自動 free（#71、C0/C1） | ✅ Python + C + Native |
+| [tests/test_40_struct_box_free.ml](../tests/test_40_struct_box_free.ml) | struct フィールド `Box<T>` free / `Option<Box<T>>` free（#67/#68） | ✅ Python + C + Native |
+| [tests/test_41_iter_string_deep_copy.ml](../tests/test_41_iter_string_deep_copy.ml) | `Iter<string>` `first()`/`filter()`/`skip()` deep copy（#70） | ✅ Python + C + Native |
 | [tests/test_42_iter_lambda_param_count.ml](../tests/test_42_iter_lambda_param_count.ml) | `Iter<T>` ラムダ引数数チェック（#69、C0） | ✅ Python + C + Native |
 | [tests/test_43_task_when_all_any.ml](../tests/test_43_task_when_all_any.ml) | `Task::when_all` / `Task::when_any` コンビネータ（#61、C0/C1） | ✅ Python + C + Native |
 | [tests/test_44_async_cancel.ml](../tests/test_44_async_cancel.ml) | `weak` / `cancel` Task キャンセル機構（#52、C0/C1） | ✅ Python + C + Native |
+| [tests/test_45_observable.ml](../tests/test_45_observable.ml) | `Observable<T>` / `Subject<T>` リアクティブストリーム（#45、C0/C1）i32 / string / struct 型テスト含む | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 

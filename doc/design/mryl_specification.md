@@ -1,7 +1,7 @@
 ﻿# Mryl プログラミング言語 - 言語詳細仕様書
 
 **バージョン**: 0.6.0
-**最終更新**: 2026年4月2日
+**最終更新**: 2026年4月5日
 
 ---
 
@@ -136,7 +136,17 @@ Mryl/
 │   ├── test_32_iter_chain_free.ml   # チェーン中間 MrylVec のメモリ解放（#62）
 │   ├── test_33_select_many.ml       # select_many C コード生成（#65、C0/C1/MC/DC）
 │   ├── test_34_closure_capture.ml   # クロージャキャプチャ fat pointer（#44、C0/C1/MC/DC）
-│   └── test_35_box_free.ml          # Box<T> 自動 free（スコープ・return・ループ・多重・Vec<Box<T>>、#66）
+│   ├── test_35_box_free.ml          # Box<T> 自動 free（スコープ・return・ループ・多重・Vec<Box<T>>、#66）
+│   ├── test_36_for_each_void_stmt.ml    # for_each void 文式・キャプチャあり fat pointer ラムダ（#64）
+│   ├── test_37_iter_lambda_typecheck.ml # Iter<T> メソッドへのラムダ引数型検査（#63、C0/C1/MC/DC）
+│   ├── test_38_async_result.ml          # async fn + Result<T,E> FAULTED 状態伝播（#51）
+│   ├── test_39_toarray_free.ml          # to_array() 結果 MrylVec の自動 free（#71、C0/C1）
+│   ├── test_40_struct_box_free.ml       # struct フィールド Box<T> free / Option<Box<T>> free（#67/#68）
+│   ├── test_41_iter_string_deep_copy.ml # Iter<string> first()/filter()/skip() deep copy（#70）
+│   ├── test_42_iter_lambda_param_count.ml # Iter<T> ラムダ引数数チェック（#69、C0）
+│   ├── test_43_task_when_all_any.ml     # Task::when_all / Task::when_any コンビネータ（#61、C0/C1）
+│   ├── test_44_async_cancel.ml          # weak / cancel Task キャンセル機構（#52、C0/C1）
+│   └── test_45_observable.ml            # Observable<T> / Subject<T> リアクティブストリーム（#45、C0/C1）
 ├── my/                               # 動作確認用 Mryl コード置き場
 ├── bin/
 │   ├── Mryl.c                # 生成された C ソースコード
@@ -268,7 +278,54 @@ cancel(tok_h);  // タイムアウトした場合に handle をキャンセル
 | `cancel(token)` | `__task_cancel(token)` |
 | `WeakTask<T>` 型 | `MrylTask*` |
 
-### 3.6 条件付きコンパイル
+### 3.6 Observable\<T\> / Subject\<T\>（リアクティブストリーム、v0.6.0）
+
+C# Rx.NET と同じパイプライン設計のリアクティブストリーム。
+
+| 型 / 概念 | 説明 |
+|-----------|------|
+| `Subject<T>` | イベントの発信源。subscribe の登録先 |
+| `Observable<T>` | パイプライン（filter/map 等の変換後のストリーム） |
+| `Subscription` | 購読を管理するハンドル。`unsubscribe()` で解除 |
+
+**Subject<T> API:**
+
+| 式 / 文 | 説明 |
+|---------|------|
+| `Subject<T>::new()` | 新しい Subject を作成（C: `mryl_subject_T_new()`） |
+| `s.emit(val)` | 購読者全員に値を送信 |
+| `s.complete()` | 完了通知（以降の emit 無視） |
+| `s.error(msg)` | エラー通知（以降の emit 無視） |
+| `s.subscribe(on_next)` | 購読登録（`Subscription` 返し） |
+| `s.subscribe(on_next, on_error, on_complete)` | 3 ハンドラ版 |
+| `s.filter(pred)` | 述語を満たす値のみ通過する `Observable<T>` |
+| `s.map(mapper)` | 値を変換した `Observable<T>` |
+| `s.take(n)` | 先頭 n 件のみ通過する `Observable<T>` |
+| `s.skip(n)` | 先頭 n 件をスキップする `Observable<T>` |
+| `s.merge(other)` | 2 ソースを合流する `Observable<T>` |
+| `sub.unsubscribe()` | 購読解除（C: `mryl_subscription_unsubscribe(sub)`） |
+
+**型パラメータ T:** 数値型・`string`・ユーザー定義 `struct` に対応。
+
+**C コード生成:** モノモーフ化方式。`Subject<i32>` → `MrylSubject_i32*` として型ごとに展開。  
+オペレータは新しい Subject を生成して上流に subscribe 登録するパイプライン方式。
+
+```mryl
+let s: Subject<i32> = Subject<i32>::new();
+let obs: Observable<i32> = s
+    .filter((x: i32) => { return x > 0; })
+    .map((x: i32)    => { return x * 10; });
+let sub: Subscription = obs.subscribe((x: i32) => { println("{}", x); });
+s.emit(-1);  // スキップ
+s.emit(3);   // 30
+sub.unsubscribe();
+```
+
+**制限（v0.6.0）:**
+- `debounce()` / `next_async()` オペレータは v0.7.0 候補（issue 化済み）
+- Subject のバックプレッシャー制御なし
+
+### 3.8 条件付きコンパイル
 
 | ディレクティブ | 説明 | 例 |
 |----------|------|-----|
@@ -283,7 +340,7 @@ cancel(tok_h);  // タイムアウトした場合に handle をキャンセル
 - Parser で ConditionalBlock AST 構築
 - CodeGenerator で条件評価 → 該当ブロックのみコンパイル
 
-### 3.7 数値型型昇格システム
+### 3.9 数値型型昇格システム
 
 二項演算で型が異なる場合、自動的に上位の型に昇格：
 
@@ -296,7 +353,7 @@ cancel(tok_h);  // タイムアウトした場合に handle をキャンセル
 - 例: i32 + f32 → f64, u16 + u64 → u64
 ```
 
-### 3.8 fn 型パラメータ（高階関数・コールバック）
+### 3.10 fn 型パラメータ（高階関数・コールバック）
 
 | 機能 | 説明 |
 |------|------|
@@ -307,7 +364,7 @@ cancel(tok_h);  // タイムアウトした場合に handle をキャンセル
 | 名前付き関数を渡す | `apply(my_func, 5)` — 定義済み関数を渡す |
 | C コード生成 | `MrylFn_*` fat pointer 構造体（`{fn_ptr, env}`）。名前付き関数を渡す場合は `void* __e` 付き thunk を自動生成して fat pointer でラップ |
 
-### 3.9 static fn（静的メソッド）
+### 3.11 static fn（静的メソッド）
 
 | 機能 | 説明 |
 |------|------|
