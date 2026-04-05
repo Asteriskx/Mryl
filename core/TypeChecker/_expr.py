@@ -1,5 +1,6 @@
 from Ast import *
 from MrylError import *
+from TypeChecker._proto import _TypeCheckerBase
 from TypeChecker._util import (
     INTEGER_TYPES, FLOAT_TYPES,
     is_integer_type as _is_integer_type,
@@ -8,7 +9,7 @@ from TypeChecker._util import (
 )
 
 
-class TypeCheckerExprMixin:
+class TypeCheckerExprMixin(_TypeCheckerBase):
     """式（Expression）レベルの型チェックを担当する Mixin。
 
     check_expr / lookup_var / _pattern_bindings_scope /

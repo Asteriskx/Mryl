@@ -1,8 +1,9 @@
 from Ast import *
 from MrylError import *
+from TypeChecker._proto import _TypeCheckerBase
 
 
-class TypeCheckerCallMixin:
+class TypeCheckerCallMixin(_TypeCheckerBase):
     """構造体・関数・メソッド呼び出しおよびジェネリクス解決を担当する Mixin。
 
     check_struct_init / check_struct_access /
