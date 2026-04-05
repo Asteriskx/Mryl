@@ -1,4 +1,4 @@
-# Mryl プログラミング言語(v0.6.0) - 言語リファレンス
+# Mryl プログラミング言語(v0.7.0) - 言語リファレンス
 
 <p align="left">
   <img src="assets/icon_banner.svg" width="700" alt="Mryl banner"/>
