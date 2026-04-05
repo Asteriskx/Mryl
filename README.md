@@ -1,4 +1,4 @@
-# Mryl プログラミング言語(v0.5.0) - 言語リファレンス
+# Mryl プログラミング言語(v0.6.0) - 言語リファレンス
 
 <p align="left">
   <img src="assets/icon_banner.svg" width="700" alt="Mryl banner"/>
@@ -23,24 +23,25 @@
 11. [関数](#関数)
 12. [ラムダ式](#ラムダ式)
 13. [async / await](#async--await)
-14. [ジェネリック](#ジェネリック)
-15. [構造体](#構造体)
-16. [static fn（静的メソッド）](#static-fn静的メソッド)
-17. [enum（列挙型）](#enum列挙型)
-18. [match 式](#match-式)
-19. [Result 型とエラーハンドリング](#result-型とエラーハンドリング)
-20. [Option 型](#option-型)
-21. [Box 型（ヒープポインタ）](#box-型ヒープポインタ)
-22. [配列（固定長）](#配列固定長)
-23. [可変長配列（T[]）](#可変長配列t)
-24. [組み込み関数](#組み込み関数)
-25. [string 組み込みメソッド](#string-組み込みメソッド)
-26. [Iter\<T\> / LINQ スタイルコレクション操作](#itert--linq-スタイルコレクション操作)
-27. [型推論](#型推論)
-28. [型チェック](#型チェック)
-29. [まとめ](#まとめ)
-30. [テストファイル](#テストファイル)
-31. [トラブルシューティング](#トラブルシューティング)
+14. [Observable\<T\> / Subject\<T\>（リアクティブストリーム）](#observablet--subjecttリアクティブストリーム)
+15. [ジェネリック](#ジェネリック)
+16. [構造体](#構造体)
+17. [static fn（静的メソッド）](#static-fn静的メソッド)
+18. [enum（列挙型）](#enum列挙型)
+19. [match 式](#match-式)
+20. [Result 型とエラーハンドリング](#result-型とエラーハンドリング)
+21. [Option 型](#option-型)
+22. [Box 型（ヒープポインタ）](#box-型ヒープポインタ)
+23. [配列（固定長）](#配列固定長)
+24. [可変長配列（T[]）](#可変長配列t)
+25. [組み込み関数](#組み込み関数)
+26. [string 組み込みメソッド](#string-組み込みメソッド)
+27. [Iter\<T\> / LINQ スタイルコレクション操作](#itert--linq-スタイルコレクション操作)
+28. [型推論](#型推論)
+29. [型チェック](#型チェック)
+30. [まとめ](#まとめ)
+31. [テストファイル](#テストファイル)
+32. [トラブルシューティング](#トラブルシューティング)
 
 ---
 
@@ -737,7 +738,7 @@ fn main() {
 - **型注釈**：パラメータに `: 型` で型を指定
 - **単一式ボディ**：`(x: i32) => x * 2` のように `=>` の右辺を単一の式で記述
 - **ブロックボディ**：`(x: i32) => { ... }` のように `{ }` で複数ステートメントを記述可能。`return` 文なしは `void`、`return` 文ありはその型を自動推論
-- **関数ポインタ型**：C コード生成時は型付き関数ポインタ (`int32_t (*f)(int32_t)`) に変換
+- **関数ポインタ型**：C コード生成時は fat pointer 構造体（`MrylFn_*`）に変換。名前付き関数を渡す場合は `void* env` 付き thunk を自動生成
 - **クロージャ**：Python インタプリタモードでは宣言時の環境をキャプチャ
 
 ### async ラムダ式
@@ -846,6 +847,65 @@ fn main() {
 
 ---
 
+### Task コンビネータ（v0.6.0）
+
+複数の `Future<T>` を同時に待機する静的メソッドです。
+
+| API | 説明 |
+|-----|------|
+| `Task::when_all([t1, t2, ...])` | 全タスクの完了を待機し、結果を配列で返す（`Future<T[]>`） |
+| `Task::when_any([t1, t2, ...])` | 最初に完了したタスクの結果を返す（`Future<T>`） |
+
+```mryl
+async fn fetch(n: i32) -> i32 { return n; }
+
+fn main() {
+    let t1 = fetch(10);
+    let t2 = fetch(20);
+
+    // when_all: 全件完了を待機 → 結果配列
+    let all: i32[] = await Task::when_all([t1, t2]);
+    println("{}", all[0]);   // 10
+    println("{}", all[1]);   // 20
+
+    let t3 = fetch(1);
+    let t4 = fetch(2);
+
+    // when_any: 最初に完了した値を取得（FIFO スケジューラ → t3 が先）
+    let first: i32 = await Task::when_any([t3, t4]);
+    println("{}", first);    // 1
+}
+```
+
+> **制限（v0.6.0）**: 要素型 `T` は `void` および `Result<T,E>` 非対応。全要素が同一型であること。
+
+---
+
+### Task キャンセル（v0.6.0）
+
+`weak(handle)` で弱参照 `WeakTask<T>` を取得し、`cancel(token)` でキャンセルします。
+
+| API | 説明 |
+|-----|------|
+| `weak(handle: Future<T>)` | 弱参照 `WeakTask<T>` を取得（`__task_weak_retain` に対応） |
+| `cancel(token: WeakTask<T>)` | Task をキャンセル（冪等・完了済みなら何もしない） |
+
+```mryl
+async fn long_task(n: i32) -> i32 { return n * 2; }
+
+fn main() {
+    let handle = long_task(42);
+    let token: WeakTask<i32> = weak(handle);  // 弱参照取得
+
+    cancel(token);  // キャンセル（handle は await しない）
+}
+```
+
+**設計規約**: キャンセルは「Task を捨てる」操作。キャンセル後に `handle` を `await` しない。  
+`WeakTask<T>` を `await` しようとすると TypeChecker がエラーを出します。
+
+---
+
 ### アーキテクチャ概要
 
 Mryl の async/await は **C# 風の状態機械 + シングルスレッドスケジューラ** で実装されています。
@@ -950,8 +1010,9 @@ await がある場合、状態番号が増えて中断点を記録します（`m
 ### キャンセル
 
 ```mryl
-// （将来仕様 - 現在は予約）
-cancel(handle);   // weak ref 経由でキャンセル
+let handle = long_task(42);
+let token: WeakTask<i32> = weak(handle);  // 弱参照取得
+cancel(token);                             // キャンセル（handle は await しない）
 ```
 
 `__task_cancel()` を呼ぶと `state = MRYL_TASK_CANCELLED` になり、  
@@ -969,6 +1030,141 @@ awaiter が存在すれば自動的に再スケジュールされます。
 | キャンセル | `__task_cancel()` + `on_cancel` コールバック |
 | `#include` | `<pthread.h>` 不要、`-lpthread` リンク不要 |
 | Python モード | `asyncio.create_task()` + `loop.run_until_complete()` |
+
+---
+
+## Observable\<T\> / Subject\<T\>（リアクティブストリーム）
+
+**v0.6.0 追加。C# Rx.NET と同じパイプライン設計**のリアクティブストリームです。  
+`Subject<T>` がイベントの発信源、`Observable<T>` がパイプライン（フィルタ・変換後のストリーム）を表します。
+
+### 基本的な使い方
+
+```mryl
+fn main() {
+    let s: Subject<i32> = Subject<i32>::new();
+
+    // subscribe: イベントを受信するコールバックを登録
+    let sub: Subscription = s.subscribe((x: i32) => {
+        println("received: {}", x);
+    });
+
+    s.emit(1);   // received: 1
+    s.emit(2);   // received: 2
+
+    sub.unsubscribe();  // 購読解除後は on_next が呼ばれない
+    s.emit(3);   // 無視される
+}
+```
+
+### オペレータ（パイプライン）
+
+`filter` / `map` / `take` / `skip` / `merge` でストリームを変換できます。  
+各オペレータは新しい `Observable<T>` を返し、**チェーン可能**です。
+
+```mryl
+fn main() {
+    let s: Subject<i32> = Subject<i32>::new();
+
+    // filter + map チェーン
+    let obs: Observable<i32> = s
+        .filter((x: i32) => { return x > 0; })
+        .map((x: i32) => { return x * 10; });
+
+    let sub: Subscription = obs.subscribe((x: i32) => {
+        println("H: {}", x);
+    });
+
+    s.emit(-1);  // スキップ
+    s.emit(2);   // H: 20
+    s.emit(4);   // H: 40
+    sub.unsubscribe();
+}
+```
+
+### complete / error ハンドラ
+
+```mryl
+fn main() {
+    let s: Subject<i32> = Subject<i32>::new();
+    let sub: Subscription = s.subscribe(
+        (x: i32)     => { println("next: {}", x); },
+        (e: string)  => { println("error: {}", e); },
+        ()           => { println("complete"); }
+    );
+    s.emit(1);         // next: 1
+    s.complete();      // complete（以降の emit は無視）
+    s.emit(2);         // 無視
+    sub.unsubscribe();
+}
+```
+
+### merge（2 ソース合流）
+
+```mryl
+fn main() {
+    let s1: Subject<i32> = Subject<i32>::new();
+    let s2: Subject<i32> = Subject<i32>::new();
+    let merged: Observable<i32> = s1.merge(s2);
+    let sub: Subscription = merged.subscribe((x: i32) => {
+        println("I: {}", x);
+    });
+    s1.emit(1);  // I: 1
+    s2.emit(2);  // I: 2
+    s1.emit(3);  // I: 3
+    sub.unsubscribe();
+}
+```
+
+### API 一覧
+
+#### Subject\<T\> — 発信源
+
+| メソッド | 説明 |
+|---------|------|
+| `Subject<T>::new()` | 新しい Subject を作成 |
+| `s.emit(val: T)` | 購読者全員に値を送信（complete/error 済みの場合は無視） |
+| `s.complete()` | ストリーム完了を通知（以降の emit を無視） |
+| `s.error(msg: string)` | エラーを通知（以降の emit を無視） |
+| `s.subscribe(on_next)` | コールバックを登録し `Subscription` を返す |
+| `s.subscribe(on_next, on_error, on_complete)` | 3 ハンドラ版 |
+| `s.filter(pred)` | 述語を満たす値のみ通過する `Observable<T>` を返す |
+| `s.map(mapper)` | 変換した値を流す `Observable<T>` を返す |
+| `s.take(n)` | 先頭 n 件のみ通過する `Observable<T>` を返す |
+| `s.skip(n)` | 先頭 n 件をスキップする `Observable<T>` を返す |
+| `s.merge(other)` | 2 つのソースを合流する `Observable<T>` を返す |
+
+#### Observable\<T\> — パイプライン
+
+Subject と同じオペレータ（`filter` / `map` / `take` / `skip` / `merge` / `subscribe`）を使用できます。
+
+#### Subscription — 購読管理
+
+| メソッド | 説明 |
+|---------|------|
+| `sub.unsubscribe()` | 購読を解除（以降の on_next が呼ばれなくなる） |
+
+### サポートする型
+
+`Subject<T>` の型パラメータ `T` には以下が使用できます：
+
+| 型 | 例 |
+|----|----|
+| 数値型 | `Subject<i32>`, `Subject<f64>` |
+| string | `Subject<string>` |
+| ユーザー定義 struct | `Subject<Point>` |
+
+### C コード生成
+
+`Subject<T>` はモノモーフ化方式で型ごとに展開されます：
+
+```c
+// Subject<i32> の場合
+MrylSubject_i32* s = mryl_subject_i32_new();
+mryl_subject_i32_emit(s, 42);
+void* sub = mryl_subject_i32_subscribe(s, on_next_fn, NULL, NULL, NULL);
+mryl_subscription_unsubscribe(sub);
+```
 
 ---
 
@@ -1089,6 +1285,42 @@ let dist = p.distance();
 println("Distance: {}", dist);
 ```
 
+### Box フィールドを持つ struct の自動メモリ解放
+
+`Box<T>` 型のフィールドを持つ struct は、コンパイラが自動的に **デストラクタ関数 `mryl_free_StructName()`** を生成します。
+この関数は struct 変数のスコープ終了時・`return` 文実行前に自動で呼ばれ、Box フィールドを `free` します。
+手動で `free` を呼ぶ必要はありません。
+
+```mryl
+struct Node {
+    value: i32;
+    data: Box<i32>;
+}
+
+fn example() {
+    let n = Node { value: 1, data: Box::new(42) };
+    println("{}", *n.data);
+    // スコープ終了時に mryl_free_Node(n) が自動呼び出し → free(n.data)
+}
+```
+
+ネストした struct（フィールドに別の struct を持つ場合）も再帰的に解放されます。
+
+```mryl
+struct Inner {
+    x: Box<i32>;
+}
+
+struct Outer {
+    inner: Inner;
+}
+
+fn example() {
+    let o = Outer { inner: Inner { x: Box::new(10) } };
+    // スコープ終了時: mryl_free_Outer(o) → mryl_free_Inner(o.inner) → free(o.inner.x)
+}
+```
+
 ---
 
 ## static fn（静的メソッド）
@@ -1170,7 +1402,11 @@ let c2 = make(Counter::zero);
 |---|---|
 | `static fn zero() -> Counter` | `Counter Counter_zero()` |
 | `Counter::zero()` | `Counter_zero()` |
-| `Counter::zero`（参照） | `Counter_zero`（関数ポインタ） |
+| `Counter::zero`（単純参照） | `Counter_zero`（関数ポインタ） |
+| `Counter::zero`（`fn()->Counter` 型引数・変数代入） | thunk + fat pointer `MrylFn_void_ret_Counter` |
+
+> `fn(T)->U` 型パラメータへ渡す場合や `fn` 型変数へ代入する場合は、
+> 統一的な fat pointer 規約（`MrylFn_*`）に合わせるため thunk ラッパーが自動生成されます。
 
 ---
 
@@ -1475,6 +1711,17 @@ let bb2: Box<Box<i32>> = Box::new(Box::new(5));
 ```mryl
 let boxes: Box<i32>[] = ...;
 // → for 各要素 { free(element) } → free(boxes.data)
+```
+
+#### Option<Box<T>>
+
+`Option<Box<T>>` 変数は、スコープ終了時に値が存在する場合のみ `free` されます。
+
+```mryl
+fn example() {
+    let ob: Option<Box<i32>> = Some(Box::new(99));
+    // スコープ終了時: if(ob.has_value) free(ob.value)
+}
 ```
 
 ---
@@ -1903,6 +2150,7 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 ✓ **Iter\<T\> / LINQ**（`filter` / `select` / `take` / `skip` / `to_array` / `aggregate` / `for_each` / `count` / `first` / `any` / `all` / `select_many`）  
 ✓ **ユーザー入力**（`read_line()` / `parse_int()` / `parse_f64()`（`Result<T, string>` 返し）/ `checked_div()`）  
 ✓ **async / await**（状態機械 + シングルスレッドスケジューラ、`-lpthread` 不要）  
+✓ **Observable\<T\> / Subject\<T\>**（リアクティブストリーム、filter / map / take / skip / merge）  
 ✓ Python インタプリタ + C コードジェネレータの二重実行エンジン  
 
 学習用言語としても、趣味の言語としても十分な完成度を持っています。
@@ -1951,6 +2199,13 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_36_for_each_void_stmt.ml](../tests/test_36_for_each_void_stmt.ml) | `for_each` void 文式・キャプチャあり fat pointer ラムダ（#64） | ✅ Python + C + Native |
 | [tests/test_37_iter_lambda_typecheck.ml](../tests/test_37_iter_lambda_typecheck.ml) | `Iter<T>` メソッドへのラムダ引数型検査（#63、C0/C1/MC/DC） | ✅ Python + C + Native |
 | [tests/test_38_async_result.ml](../tests/test_38_async_result.ml) | `async fn` + `Result<T,E>` FAULTED 状態伝播（#51） | ✅ Python + C + Native |
+| [tests/test_39_toarray_free.ml](../tests/test_39_toarray_free.ml) | `to_array()` 結果 MrylVec の自動 free（#71、C0/C1） | ✅ Python + C + Native |
+| [tests/test_40_struct_box_free.ml](../tests/test_40_struct_box_free.ml) | struct フィールド `Box<T>` free / `Option<Box<T>>` free（#67/#68） | ✅ Python + C + Native |
+| [tests/test_41_iter_string_deep_copy.ml](../tests/test_41_iter_string_deep_copy.ml) | `Iter<string>` `first()`/`filter()`/`skip()` deep copy（#70） | ✅ Python + C + Native |
+| [tests/test_42_iter_lambda_param_count.ml](../tests/test_42_iter_lambda_param_count.ml) | `Iter<T>` ラムダ引数数チェック（#69、C0） | ✅ Python + C + Native |
+| [tests/test_43_task_when_all_any.ml](../tests/test_43_task_when_all_any.ml) | `Task::when_all` / `Task::when_any` コンビネータ（#61、C0/C1） | ✅ Python + C + Native |
+| [tests/test_44_async_cancel.ml](../tests/test_44_async_cancel.ml) | `weak` / `cancel` Task キャンセル機構（#52、C0/C1） | ✅ Python + C + Native |
+| [tests/test_45_observable.ml](../tests/test_45_observable.ml) | `Observable<T>` / `Subject<T>` リアクティブストリーム（#45、C0/C1）i32 / string / struct 型テスト含む | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 

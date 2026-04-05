@@ -25,6 +25,7 @@ class TokenKind(Enum):
     # Async/Await
     ASYNC = auto()
     AWAIT = auto()
+    WEAK  = auto()   # weak — WeakTask 取得
     
     # Compound assignment operators
     PLUS_EQ = auto()     # +=
@@ -143,6 +144,7 @@ class Lexer:
         "false": TokenKind.FALSE,
         "async": TokenKind.ASYNC,
         "await": TokenKind.AWAIT,
+        "weak":  TokenKind.WEAK,
         "enum":  TokenKind.ENUM,
         "match": TokenKind.MATCH,
         "static": TokenKind.STATIC,

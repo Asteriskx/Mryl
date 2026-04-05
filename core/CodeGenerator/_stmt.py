@@ -2,6 +2,31 @@ from __future__ import annotations
 from CodeGenerator._util import _safe_c_name
 from CodeGenerator._proto import _CodeGeneratorBase
 
+
+def _iter_chain_owns_alloc(expr) -> bool:
+    """Iter チェーンの末端 to_array() 結果が独立した malloc を持つかを判定する。
+
+    - filter / select / select_many: 常に新 alloc → owned
+    - take: source の .data を共有 → source の ownership を継承
+    - skip(src が MethodCall): 中間 Iter は新 alloc → owned
+    - skip(src が VarRef): ポインタ算術（view）→ 新 alloc なし
+    - その他 / VarRef: ユーザー変数の borrow の可能性 → unsafe
+    """
+    cls = expr.__class__.__name__
+    if cls != "MethodCall":
+        # VarRef などのユーザー変数直接 → borrow の可能性あり
+        return False
+    method = expr.method
+    if method in ('filter', 'select', 'select_many'):
+        return True
+    if method == 'take':
+        # take は source alloc を共有するため source の ownership を継承
+        return _iter_chain_owns_alloc(expr.obj)
+    if method == 'skip':
+        # skip の src が中間 MethodCall なら新 alloc、VarRef なら view
+        return expr.obj.__class__.__name__ == 'MethodCall'
+    return False
+
 class CodeGeneratorStmtMixin(_CodeGeneratorBase):
     """文(Statement)レベルの C コード生成を担当する Mixin
     _generate_statement / _generate_conditional_block / _generate_let /
@@ -58,9 +83,14 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         self._emit("}")
         self._emit(f"free({c_var_name}.data);")
 
-    def _emit_loop_iteration_cleanup(self, saved_str_vars: list, saved_box_count: int, saved_bv_count: int) -> None:
+    def _emit_loop_iteration_cleanup(
+        self, saved_str_vars: list, saved_box_count: int, saved_bv_count: int,
+        saved_tav_count: int = 0, saved_sbv_count: int = 0, saved_obv_count: int = 0
+    ) -> None:
         """ループイテレーション内で宣言された変数を解放し、保存状態に復元する。
         while / for の各ブランチで共通して使用する（DRY）。
+        saved_sbv_count: struct Box 変数リストの保存長（#68）
+        saved_obv_count: Option<Box<T>> 変数リストの保存長（#67）
         """
         for vn in self.local_string_vars:
             if vn not in saved_str_vars:
@@ -72,6 +102,18 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         for (vn, _tn) in reversed(self.local_box_vec_vars[saved_bv_count:]):
             self._emit_box_vec_free(vn)
         self.local_box_vec_vars = self.local_box_vec_vars[:saved_bv_count]
+        # to_array() 結果 Vec 変数: ループ内で宣言されたものを解放（#71）
+        for vn in reversed(self.local_toarray_vec_vars[saved_tav_count:]):
+            self._emit(f"free({vn}.data);")
+        self.local_toarray_vec_vars = self.local_toarray_vec_vars[:saved_tav_count]
+        # Box フィールド持ち struct 変数: デストラクタを呼ぶ（#68）
+        for (vn, sname) in reversed(self.local_struct_box_vars[saved_sbv_count:]):
+            self._emit(f"mryl_free_{sname}({vn});")
+        self.local_struct_box_vars = self.local_struct_box_vars[:saved_sbv_count]
+        # Option<Box<T>> 変数: has_value なら Box を free（#67）
+        for vn in reversed(self.local_option_box_vars[saved_obv_count:]):
+            self._emit(f"if ({vn}.has_value) {{ free({vn}.value); }}")
+        self.local_option_box_vars = self.local_option_box_vars[:saved_obv_count]
 
     def _generate_statement(self, stmt):
         """文ノードを C コードとして出力する (ディスパッチャ) """
@@ -207,17 +249,47 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                 return
 
         # static fn 参照（has_parens=False の EnumVariantExpr）を fn 型変数として宣言
+        # fn(T)->U 型注釈がある場合は thunk + fat pointer (MrylFn_*) として生成する（#76）
+        # ※ raw 関数ポインタ形式だと呼び出し側の `var.fn(...)` 規約と不整合になる
         if init_expr_class == "EnumVariantExpr" and not stmt.init_expr.has_parens:
             if type_node and type_node.name == "fn" and getattr(type_node, 'type_args', None):
-                ret_t      = self._type_to_c(type_node.type_args[-1])
-                arg_types  = [self._type_to_c(t) for t in type_node.type_args[:-1]]
-                args_str   = ", ".join(arg_types) if arg_types else "void"
+                c_func_name = f"{stmt.init_expr.enum_name}_{stmt.init_expr.variant_name}"
+                method = next(
+                    (m for s in self.structs for m in s.methods
+                     if getattr(m, 'is_static', False) and f"{s.name}_{m.name}" == c_func_name),
+                    None
+                )
                 c_var_name = _safe_c_name(stmt.name)
                 if c_var_name != stmt.name:
                     self.ident_renames[stmt.name] = c_var_name
-                c_func = self._generate_expr(stmt.init_expr)
-                self._emit(f"{ret_t} (*{c_var_name})({args_str}) = {c_func};")
+                fn_c_type  = self._type_to_c(type_node)
+                if method is not None:
+                    # thunk を生成して fat pointer に包む（method.params は static fn なので self なし）
+                    thunk_name   = f"__thunk_{self.thunk_counter}"
+                    self.thunk_counter += 1
+                    t_params_c   = [
+                        f"{self._type_to_c(p.type_node) if p.type_node else 'int32_t'} {p.name}"
+                        for p in method.params
+                    ]
+                    t_params_str = ", ".join(t_params_c)
+                    t_ret        = self._type_to_c(method.return_type) if method.return_type else "void"
+                    call_args    = ", ".join(p.name for p in method.params)
+                    ret_kw       = "return " if t_ret != "void" else ""
+                    self.pending_lambdas.append(
+                        (thunk_name, t_ret, t_params_str, [f"    {ret_kw}{c_func_name}({call_args});"], {})
+                    )
+                    arg_cs_t = [self._type_to_c(p.type_node) if p.type_node else "int32_t" for p in method.params]
+                    self.lambda_captures[thunk_name] = {'captures': {}, 'ret_c': t_ret, 'arg_cs': arg_cs_t}
+                    self.fn_type_registry.add((tuple(arg_cs_t), t_ret, fn_c_type))
+                    self._emit(f"{fn_c_type} {c_var_name} = {{{thunk_name}, NULL}};")
+                else:
+                    # static method が見つからない場合はフォールバック（既存挙動）
+                    c_func = self._generate_expr(stmt.init_expr)
+                    self._emit(f"{fn_c_type} {c_var_name};")
+                    self._emit(f"{c_var_name}.fn = (void*){c_func};")
+                    self._emit(f"{c_var_name}.env = NULL;")
                 self.env[-1][stmt.name] = "fn"
+                self.fn_var_c_types[stmt.name] = fn_c_type
                 return
 
         # FunctionCall 引数の StringLiteral を一時変数化
@@ -267,6 +339,15 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                 self.local_box_vec_vars.append((stmt.name, inner_tn))
             else:
                 ct = _c_map.get(et, "int32_t")
+            # to_array() 結果を代入する場合は .data の free が必要なため追跡する（#71）
+            # ただし take/skip(on user var) は .data をソースと共有するため free 不可。
+            # _iter_chain_owns_alloc() で ownership を確認してから登録する。
+            if (stmt.init_expr is not None
+                    and init_expr_class != "ArrayLiteral"
+                    and stmt.init_expr.__class__.__name__ == "MethodCall"
+                    and stmt.init_expr.method == "to_array"
+                    and _iter_chain_owns_alloc(stmt.init_expr.obj)):
+                self.local_toarray_vec_vars.append(_safe_c_name(stmt.name))
             if init_expr_class == "ArrayLiteral" and stmt.init_expr.elements:
                 elements  = [self._generate_expr(elem) for elem in stmt.init_expr.elements]
                 elems_str = ", ".join(elements)
@@ -340,6 +421,31 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                                                    stmt.init_expr.operand.name)
                     self.box_inner_moved.add(src_c)
                 self.local_box_vars.append((c_var, type_node))
+            # Option<Box<T>> 変数を追跡: スコープ終了時に has_value なら Box を free（#67）
+            if (type_node and type_node.name == "Option"
+                    and getattr(type_node, 'type_args', None) and not self.has_user_box):
+                inner = type_node.type_args[0]
+                if (inner is not None and not isinstance(inner, str)
+                        and hasattr(inner, 'name') and inner.name == "Box"):
+                    c_var = self.ident_renames.get(stmt.name, stmt.name)
+                    self.local_option_box_vars.append(c_var)
+            # Box<T> フィールドを持つ struct 変数を追跡: スコープ終了時にデストラクタを呼ぶ（#68）
+            if type_node and not self.has_user_box:
+                struct_decl = next((s for s in self.structs if s.name == type_node.name), None)
+                if struct_decl and self._struct_has_box_fields(struct_decl):
+                    c_var = self.ident_renames.get(stmt.name, stmt.name)
+                    # StructInit フィールド値が VarRef の場合: 元の struct 変数は所有権移動とみなす。
+                    # C の値コピーで Box ポインタが共有されるため、元変数のデストラクタ呼び出しを
+                    # 除外して double free を防ぐ（#68 既知制約への対処）。
+                    if init_expr_class == "StructInit":
+                        for (_fname, fval) in getattr(stmt.init_expr, 'fields', []):
+                            if fval.__class__.__name__ == "VarRef":
+                                moved_c = self.ident_renames.get(fval.name, fval.name)
+                                self.local_struct_box_vars = [
+                                    (vn, sn) for (vn, sn) in self.local_struct_box_vars
+                                    if vn != moved_c
+                                ]
+                    self.local_struct_box_vars.append((c_var, type_node.name))
             if type_node:
                 # Result<T, E> は "Result_T" 形式で env 登録する（_pattern_binding_types が ok_type を参照するため）
                 if type_node.name == "Result" and getattr(type_node, 'type_args', None):
@@ -457,6 +563,18 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         # Vec<Box<T>> 変数: 要素を先に free してから .data を free
         for (vn, _inner_tn) in reversed(self.local_box_vec_vars):
             self._emit_box_vec_free(vn)
+        # to_array() 結果 Vec 変数: 返値はスキップして .data を free（#71）
+        for vn in reversed(self.local_toarray_vec_vars):
+            if vn != return_var_c:
+                self._emit(f"free({vn}.data);")
+        # Box フィールド持ち struct 変数: 返値はスキップしてデストラクタを呼ぶ（#68）
+        for (vn, sname) in reversed(self.local_struct_box_vars):
+            if vn != return_var_c:
+                self._emit(f"mryl_free_{sname}({vn});")
+        # Option<Box<T>> 変数: 返値はスキップして has_value なら Box を free（#67）
+        for vn in reversed(self.local_option_box_vars):
+            if vn != return_var_c:
+                self._emit(f"if ({vn}.has_value) {{ free({vn}.value); }}")
 
         if stmt.expr:
             expr_class = stmt.expr.__class__.__name__
@@ -562,10 +680,16 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         saved_str_vars  = list(self.local_string_vars)
         saved_box_count = len(self.local_box_vars)
         saved_bv_count  = len(self.local_box_vec_vars)
+        saved_tav_count = len(self.local_toarray_vec_vars)
+        saved_sbv_count = len(self.local_struct_box_vars)
+        saved_obv_count = len(self.local_option_box_vars)
         for s in stmt.body.statements:
             self._generate_statement(s)
-        # ループ内で宣言された文字列・Box 変数をイテレーション末に解放
-        self._emit_loop_iteration_cleanup(saved_str_vars, saved_box_count, saved_bv_count)
+        # ループ内で宣言された文字列・Box・Vec・struct Box・Option<Box> 変数をイテレーション末に解放
+        self._emit_loop_iteration_cleanup(
+            saved_str_vars, saved_box_count, saved_bv_count, saved_tav_count,
+            saved_sbv_count, saved_obv_count
+        )
         self.indent_level -= 1
         self._emit("}")
 
@@ -639,9 +763,15 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                     saved_str_vars  = list(self.local_string_vars)
                     saved_box_count = len(self.local_box_vars)
                     saved_bv_count  = len(self.local_box_vec_vars)
+                    saved_tav_count = len(self.local_toarray_vec_vars)
+                    saved_sbv_count = len(self.local_struct_box_vars)
+                    saved_obv_count = len(self.local_option_box_vars)
                     for s in stmt.body.statements:
                         self._generate_statement(s)
-                    self._emit_loop_iteration_cleanup(saved_str_vars, saved_box_count, saved_bv_count)
+                    self._emit_loop_iteration_cleanup(
+                        saved_str_vars, saved_box_count, saved_bv_count, saved_tav_count,
+                        saved_sbv_count, saved_obv_count
+                    )
                     self.indent_level -= 1
                     self._emit("}")
                     return
@@ -666,9 +796,15 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                     saved_str_vars  = list(self.local_string_vars)
                     saved_box_count = len(self.local_box_vars)
                     saved_bv_count  = len(self.local_box_vec_vars)
+                    saved_tav_count = len(self.local_toarray_vec_vars)
+                    saved_sbv_count = len(self.local_struct_box_vars)
+                    saved_obv_count = len(self.local_option_box_vars)
                     for s in stmt.body.statements:
                         self._generate_statement(s)
-                    self._emit_loop_iteration_cleanup(saved_str_vars, saved_box_count, saved_bv_count)
+                    self._emit_loop_iteration_cleanup(
+                        saved_str_vars, saved_box_count, saved_bv_count, saved_tav_count,
+                        saved_sbv_count, saved_obv_count
+                    )
                     self.indent_level -= 1
                     self._emit("}")
                     return
@@ -690,9 +826,15 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         saved_str_vars  = list(self.local_string_vars)
         saved_box_count = len(self.local_box_vars)
         saved_bv_count  = len(self.local_box_vec_vars)
+        saved_tav_count = len(self.local_toarray_vec_vars)
+        saved_sbv_count = len(self.local_struct_box_vars)
+        saved_obv_count = len(self.local_option_box_vars)
         for s in stmt.body.statements:
             self._generate_statement(s)
-        self._emit_loop_iteration_cleanup(saved_str_vars, saved_box_count, saved_bv_count)
+        self._emit_loop_iteration_cleanup(
+            saved_str_vars, saved_box_count, saved_bv_count, saved_tav_count,
+            saved_sbv_count, saved_obv_count
+        )
         self.indent_level -= 1
         self._emit("}")
 
