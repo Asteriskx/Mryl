@@ -1,11 +1,12 @@
 from __future__ import annotations
 from CodeGenerator._proto import _CodeGeneratorBase
+from Ast import TypeNode
 
 class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
     """非同期ステートマシン生成を担当する Mixin
     _sm_let_c_type / _split_by_await /
     _generate_async_state_machine / _emit_await_setup /
-    _emit_await_resume / _generate_sm_stmt /
+    _generate_sm_stmt /
     _emit_task_complete / _emit_task_factory /
     _emit_main_sm_entry / _emit_task_runtime
     """
@@ -62,7 +63,13 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
             if cls == 'LetDecl':
                 if stmt.name not in seen_names:
                     seen_names.add(stmt.name)
-                    sm_fields.append((self._sm_let_c_type(stmt), stmt.name, 'any'))
+                    # 動的配列型（i32[] 等）は "vec_T" として登録し、メソッド呼び出し時に正確な型が取れるようにする
+                    t = stmt.type_node
+                    if t and getattr(t, 'array_size', None) == -1:
+                        mtype = f"vec_{t.name}"
+                    else:
+                        mtype = 'any'
+                    sm_fields.append((self._sm_let_c_type(stmt), stmt.name, mtype))
             elif cls == 'ForStmt':
                 if stmt.variable and stmt.variable not in seen_names:
                     seen_names.add(stmt.variable)
@@ -267,6 +274,9 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
         self._collect_sm_fields_recursive(stmts, sm_fields)
         for (_, fname, mtype) in sm_fields:
             self.env[-1][fname] = mtype
+            # 動的配列 SM フィールドは vec_var_types にも登録（ArrayAccess の .data[i] 生成に必要）
+            if mtype.startswith("vec_"):
+                self.vec_var_types[fname] = mtype[4:]
 
         # --- SM ステート構築 ---
         states, for_inits = self._build_sm_states(stmts)
@@ -344,32 +354,6 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
         self._emit("return;")
         self.indent_level -= 1
         self._emit("}")
-
-    def _emit_await_resume(self, await_stmt, await_index: int = 0):
-        """await 再開時( resume )の結果取得コードを出力する """
-        cls = await_stmt.__class__.__name__
-        if await_index in self.sm_await_handles:
-            handle = f"__sm->{self.sm_await_handles[await_index]}"
-        else:
-            if cls == 'ExprStmt':
-                handle = self._generate_expr(await_stmt.expr.expr)
-            else:
-                handle = self._generate_expr(await_stmt.init_expr.expr)
-
-        if cls == 'LetDecl':
-            var = await_stmt.name
-            if await_stmt.type_node and await_stmt.type_node.name != 'void':
-                ctype = self._type_to_c(await_stmt.type_node)
-                self._emit(f"if ({handle}->state == MRYL_TASK_CANCELLED) {{")
-                self.indent_level += 1
-                self._emit(f"__sm->{var} = 0;")
-                self.indent_level -= 1
-                self._emit("} else {")
-                self.indent_level += 1
-                self._emit(f"__sm->{var} = *({ctype}*){handle}->result;")
-                self.indent_level -= 1
-                self._emit("}")
-        self._emit(f"__task_release({handle});")
 
     def _generate_sm_stmt(self, stmt, func, has_return_val: bool):
         """SM 内文を出力する (LetDecl/ReturnStmt は SM フィールドへ代入) """
@@ -599,3 +583,129 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
         ]
         for line in lines:
             self._emit(line)
+
+    def _emit_combinator_helpers(self, combinator_types: dict):
+        """Task::when_all / Task::when_any の型別 C ランタイム関数を出力する。
+
+        combinator_types: { mryl_type_name: set_of_combinators }
+          例: {"i32": {"when_all", "when_any"}, "f64": {"when_all"}}
+        MrylVec_<T> ヘルパーより後に呼ぶこと（mryl_vec_<T>_push を使用するため）。
+        """
+        if not combinator_types:
+            return
+        self._emit("// ============================================================")
+        self._emit("// Task Combinator Helpers (when_all / when_any)")
+        self._emit("// ============================================================")
+        self._emit("")
+
+        for T, combinators in sorted(combinator_types.items()):
+            # T は文字列（例 "i32"）、C は対応する C 型名
+            C = self._type_to_c(TypeNode(T))
+
+            if "when_all" in combinators:
+                sm  = f"__WhenAll_{T}_SM"
+                fn  = f"__when_all_{T}_move_next"
+                fac = f"__mryl_when_all_{T}"
+                self._emit(f"typedef struct {{ MrylTask** __tasks; int __count; MrylVec_{T} __result; }} {sm};")
+                self._emit(f"static void {fn}(MrylTask* __task) {{")
+                self.indent_level += 1
+                self._emit(f"{sm}* __sm = ({sm}*)__task->sm;")
+                # 全タスク完了チェック（CANCELLED も終了扱い）
+                self._emit("for (int __i = 0; __i < __sm->__count; __i++) {")
+                self.indent_level += 1
+                self._emit("MrylTaskState __s = __sm->__tasks[__i]->state;")
+                self._emit("if (__s == MRYL_TASK_PENDING || __s == MRYL_TASK_RUNNING) {")
+                self.indent_level += 1
+                self._emit("__scheduler_post(__task);")
+                self._emit("return;")
+                self.indent_level -= 1
+                self._emit("}")
+                self.indent_level -= 1
+                self._emit("}")
+                # 全完了 — 結果を MrylVec_T に収集
+                self._emit(f"__sm->__result = mryl_vec_{T}_new();")
+                self._emit("for (int __i = 0; __i < __sm->__count; __i++) {")
+                self.indent_level += 1
+                self._emit(f"MrylTaskState __s = __sm->__tasks[__i]->state;")
+                self._emit(f"{C} __val = (__s == MRYL_TASK_COMPLETED) ? *({C}*)__sm->__tasks[__i]->result : ({C}){{0}};")
+                self._emit(f"mryl_vec_{T}_push(&__sm->__result, __val);")
+                self._emit("__task_release(__sm->__tasks[__i]);")
+                self.indent_level -= 1
+                self._emit("}")
+                self._emit("free(__sm->__tasks);")
+                self._emit(f"MrylVec_{T}* __res = (MrylVec_{T}*)malloc(sizeof(MrylVec_{T}));")
+                self._emit("*__res = __sm->__result;")
+                self._emit("__task->result = (void*)__res;")
+                self._emit("__task->state = MRYL_TASK_COMPLETED;")
+                self._emit("__task_release(__task);")
+                self._emit("if (__task->awaiter) __scheduler_post(__task->awaiter);")
+                self.indent_level -= 1
+                self._emit("}")
+                self._emit(f"static MrylTask* {fac}(MrylTask** __src, int __count) {{")
+                self.indent_level += 1
+                self._emit(f"MrylTask* __task = (MrylTask*)malloc(sizeof(MrylTask));")
+                self._emit(f"{sm}* __sm = ({sm}*)malloc(sizeof({sm}));")
+                self._emit(f"memset(__sm, 0, sizeof({sm}));")
+                # tasks をコピーして retain
+                self._emit("MrylTask** __tc = (MrylTask**)malloc(__count * sizeof(MrylTask*));")
+                self._emit("for (int __i = 0; __i < __count; __i++) { __tc[__i] = __src[__i]; __task_retain(__tc[__i]); }")
+                self._emit("__sm->__tasks = __tc;")
+                self._emit("__sm->__count = __count;")
+                self._emit("__task->strong_count = 1; __task->weak_count = 0;")
+                self._emit("__task->state = MRYL_TASK_PENDING; __task->result = NULL;")
+                self._emit(f"__task->move_next = {fn}; __task->on_cancel = NULL; __task->awaiter = NULL;")
+                self._emit("__task->sm = __sm;")
+                self._emit("__scheduler_post(__task);")
+                self._emit("return __task;")
+                self.indent_level -= 1
+                self._emit("}")
+                self._emit("")
+
+            if "when_any" in combinators:
+                sm  = f"__WhenAny_{T}_SM"
+                fn  = f"__when_any_{T}_move_next"
+                fac = f"__mryl_when_any_{T}"
+                self._emit(f"typedef struct {{ MrylTask** __tasks; int __count; }} {sm};")
+                self._emit(f"static void {fn}(MrylTask* __task) {{")
+                self.indent_level += 1
+                self._emit(f"{sm}* __sm = ({sm}*)__task->sm;")
+                self._emit("for (int __i = 0; __i < __sm->__count; __i++) {")
+                self.indent_level += 1
+                self._emit("MrylTaskState __s = __sm->__tasks[__i]->state;")
+                self._emit("if (__s == MRYL_TASK_COMPLETED || __s == MRYL_TASK_FAULTED || __s == MRYL_TASK_CANCELLED) {")
+                self.indent_level += 1
+                # 最初に終了したタスクの結果を返す（COMPLETED のみ値あり）
+                self._emit(f"{C}* __res = ({C}*)malloc(sizeof({C}));")
+                self._emit(f"*__res = (__s == MRYL_TASK_COMPLETED) ? *({C}*)__sm->__tasks[__i]->result : ({C}){{0}};")
+                self._emit("for (int __j = 0; __j < __sm->__count; __j++) __task_release(__sm->__tasks[__j]);")
+                self._emit("free(__sm->__tasks);")
+                self._emit("__task->result = (void*)__res;")
+                self._emit("__task->state = MRYL_TASK_COMPLETED;")
+                self._emit("__task_release(__task);")
+                self._emit("if (__task->awaiter) __scheduler_post(__task->awaiter);")
+                self._emit("return;")
+                self.indent_level -= 1
+                self._emit("}")
+                self.indent_level -= 1
+                self._emit("}")
+                self._emit("__scheduler_post(__task);")
+                self.indent_level -= 1
+                self._emit("}")
+                self._emit(f"static MrylTask* {fac}(MrylTask** __src, int __count) {{")
+                self.indent_level += 1
+                self._emit(f"MrylTask* __task = (MrylTask*)malloc(sizeof(MrylTask));")
+                self._emit(f"{sm}* __sm = ({sm}*)malloc(sizeof({sm}));")
+                self._emit(f"memset(__sm, 0, sizeof({sm}));")
+                self._emit("MrylTask** __tc = (MrylTask**)malloc(__count * sizeof(MrylTask*));")
+                self._emit("for (int __i = 0; __i < __count; __i++) { __tc[__i] = __src[__i]; __task_retain(__tc[__i]); }")
+                self._emit("__sm->__tasks = __tc;")
+                self._emit("__sm->__count = __count;")
+                self._emit("__task->strong_count = 1; __task->weak_count = 0;")
+                self._emit("__task->state = MRYL_TASK_PENDING; __task->result = NULL;")
+                self._emit(f"__task->move_next = {fn}; __task->on_cancel = NULL; __task->awaiter = NULL;")
+                self._emit("__task->sm = __sm;")
+                self._emit("__scheduler_post(__task);")
+                self._emit("return __task;")
+                self.indent_level -= 1
+                self._emit("}")
+                self._emit("")

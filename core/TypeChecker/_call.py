@@ -1,8 +1,9 @@
 from Ast import *
 from MrylError import *
+from TypeChecker._proto import _TypeCheckerBase
 
 
-class TypeCheckerCallMixin:
+class TypeCheckerCallMixin(_TypeCheckerBase):
     """構造体・関数・メソッド呼び出しおよびジェネリクス解決を担当する Mixin。
 
     check_struct_init / check_struct_access /
@@ -157,6 +158,16 @@ class TypeCheckerCallMixin:
                 return TypeNode("i32")
             raise TypeError_(f"Result has no method '{expr.method}'", expr)
 
+        # Subject<T> / Observable<T> のメソッド
+        if obj_type.name in ("Subject", "Observable"):
+            return self._check_observable_method(expr, obj_type)
+
+        # Subscription のメソッド
+        if obj_type.name == "Subscription":
+            if expr.method == "unsubscribe":
+                return TypeNode("void")
+            raise TypeError_(f"Subscription has no method '{expr.method}'", expr)
+
         # 構造体のメソッド
         struct = self.structs.get(obj_type.name)
         if not struct:
@@ -200,6 +211,15 @@ class TypeCheckerCallMixin:
     # FunctionCall（ジェネリクス解決含む）
     # ============================================
     def check_call(self, expr: FunctionCall):
+        # cancel(token) — 組み込み関数: WeakTask<T> を受け取り void を返す
+        if expr.name == "cancel":
+            if len(expr.args) != 1:
+                raise TypeError_("cancel() requires exactly 1 argument", expr)
+            arg_type = self.check_expr(expr.args[0])
+            if arg_type.name != "WeakTask":
+                raise TypeError_(f"cancel() requires WeakTask<T>, got {arg_type}", expr.args[0])
+            return TypeNode("void")
+
         # ラムダ変数 / fn型パラメータへの呼び出し (#41)
         for scope in reversed(self.env):
             if expr.name in scope:
@@ -320,10 +340,11 @@ class TypeCheckerCallMixin:
             """Iter<T> を表す TypeNode を生成する（内部表現は array_size=-1）。"""
             return TypeNode(t.name, type_args=t.type_args, array_size=-1)
 
-        def _check_lambda_sig(arg_idx, expected_param=None, expected_ret=None):
-            """ラムダ/関数引数の fn 型を取得し、引数型・戻り値型を検査する。
+        def _check_lambda_sig(arg_idx, expected_param=None, expected_ret=None, expected_count=None):
+            """ラムダ/関数引数の fn 型を取得し、引数数・引数型・戻り値型を検査する。
 
             check_expr を呼ぶことでラムダの inferred_return_type もセットされる。
+            expected_count: None → スキップ。int → パラメータ数を照合。
             expected_param: None → スキップ。TypeNode → elem_type と照合。
             expected_ret:   None → スキップ。TypeNode → 戻り値型と照合。
             戻り値: fn TypeNode（type_args = [param..., return_type]）
@@ -338,6 +359,15 @@ class TypeCheckerCallMixin:
 
             type_args = fn_type.type_args or []
             # type_args = [param0_type, ..., return_type]（最後が戻り値型）
+
+            # パラメータ数検査: type_args の末尾が戻り値型なので len-1 がパラメータ数
+            if expected_count is not None and type_args:
+                actual_count = len(type_args) - 1
+                if actual_count != expected_count:
+                    raise TypeError_(
+                        f"'{method}': lambda expects {expected_count} parameter(s), got {actual_count}",
+                        arg_expr
+                    )
 
             # パラメータ型検査: 'any'（アノテーションなしラムダ）はスキップ
             if expected_param is not None and len(type_args) >= 2:
@@ -365,7 +395,7 @@ class TypeCheckerCallMixin:
 
         if method == 'select':
             # select(fn(T)->U) -> Iter<U>
-            fn_type = _check_lambda_sig(0, expected_param=elem_type, expected_ret=None)
+            fn_type = _check_lambda_sig(0, expected_param=elem_type, expected_ret=None, expected_count=1)
             if fn_type and fn_type.type_args:
                 raw = fn_type.type_args[-1]
                 u = raw if isinstance(raw, TypeNode) else TypeNode(raw)
@@ -375,7 +405,7 @@ class TypeCheckerCallMixin:
 
         if method == 'filter':
             # filter(fn(T)->bool) -> Iter<T>
-            _check_lambda_sig(0, expected_param=elem_type, expected_ret=TypeNode('bool'))
+            _check_lambda_sig(0, expected_param=elem_type, expected_ret=TypeNode('bool'), expected_count=1)
             return _iter(elem_type)
 
         if method in ('take', 'skip'):
@@ -384,7 +414,7 @@ class TypeCheckerCallMixin:
 
         if method == 'select_many':
             # select_many(fn(T)->U[]) -> Iter<U>
-            fn_type = _check_lambda_sig(0, expected_param=elem_type, expected_ret=None)
+            fn_type = _check_lambda_sig(0, expected_param=elem_type, expected_ret=None, expected_count=1)
             if fn_type and fn_type.type_args:
                 raw = fn_type.type_args[-1]
                 u = raw if isinstance(raw, TypeNode) else TypeNode(raw)
@@ -399,17 +429,17 @@ class TypeCheckerCallMixin:
         if method == 'aggregate':
             if len(expr.args) == 1:
                 # 初期値なし: aggregate(fn(T,T)->T) -> Result<T, string>
-                _check_lambda_sig(0, expected_param=None, expected_ret=None)
+                _check_lambda_sig(0, expected_param=None, expected_ret=None, expected_count=2)
                 return TypeNode('Result', type_args=[elem_type, TypeNode('string')])
             else:
                 # 初期値あり: aggregate(seed: U, fn(U,T)->U) -> U
                 u = self.check_expr(expr.args[0]) if expr.args else elem_type
-                _check_lambda_sig(1, expected_param=None, expected_ret=None)
+                _check_lambda_sig(1, expected_param=None, expected_ret=None, expected_count=2)
                 return u
 
         if method == 'for_each':
             # for_each(fn(T)->void) -> void: 戻り値型は強制しない（値が捨てられるため）
-            _check_lambda_sig(0, expected_param=elem_type, expected_ret=None)
+            _check_lambda_sig(0, expected_param=elem_type, expected_ret=None, expected_count=1)
             return TypeNode('void')
 
         if method == 'count':
@@ -420,7 +450,88 @@ class TypeCheckerCallMixin:
 
         if method in ('any', 'all'):
             # any/all(fn(T)->bool) -> bool
-            _check_lambda_sig(0, expected_param=elem_type, expected_ret=TypeNode('bool'))
+            _check_lambda_sig(0, expected_param=elem_type, expected_ret=TypeNode('bool'), expected_count=1)
             return TypeNode('bool')
 
         raise TypeError_(f"Unknown iter method '{method}'", expr)
+
+    # ============================================
+    # Subject<T> / Observable<T> メソッドの型検査
+    # ============================================
+    def _check_observable_method(self, expr: MethodCall, obj_type: 'TypeNode'):
+        """Subject<T> / Observable<T> のメソッド呼び出しの戻り値型を返す。"""
+        method = expr.method
+        # T を取得
+        T = obj_type.type_args[0] if obj_type.type_args else TypeNode("void")
+        T = T if isinstance(T, TypeNode) else TypeNode(T)
+
+        # emit(v: T) → void
+        if method == "emit":
+            if len(expr.args) != 1:
+                raise TypeError_("emit() requires exactly 1 argument", expr)
+            self.check_expr(expr.args[0])
+            return TypeNode("void")
+
+        # complete() → void
+        if method == "complete":
+            return TypeNode("void")
+
+        # error(msg: string) → void
+        if method == "error":
+            if len(expr.args) != 1:
+                raise TypeError_("error() requires exactly 1 string argument", expr)
+            return TypeNode("void")
+
+        # filter(fn(T)->bool) → Observable<T>
+        if method == "filter":
+            if len(expr.args) != 1:
+                raise TypeError_("filter() requires a predicate function", expr)
+            self.check_expr(expr.args[0])
+            return TypeNode("Observable", type_args=[T])
+
+        # map(fn(T)->U) → Observable<U>
+        if method == "map":
+            if len(expr.args) != 1:
+                raise TypeError_("map() requires a transform function", expr)
+            fn_type = self.check_expr(expr.args[0])
+            # 戻り値型 U を fn type_args の最後から取得
+            if isinstance(fn_type, TypeNode) and fn_type.name == "fn" and fn_type.type_args:
+                U = fn_type.type_args[-1]
+                U = U if isinstance(U, TypeNode) else TypeNode(U)
+            else:
+                U = TypeNode("void")
+            return TypeNode("Observable", type_args=[U])
+
+        # take(n: i32) → Observable<T>
+        if method == "take":
+            if len(expr.args) != 1:
+                raise TypeError_("take() requires an i32 argument", expr)
+            self.check_expr(expr.args[0])
+            return TypeNode("Observable", type_args=[T])
+
+        # skip(n: i32) → Observable<T>
+        if method == "skip":
+            if len(expr.args) != 1:
+                raise TypeError_("skip() requires an i32 argument", expr)
+            self.check_expr(expr.args[0])
+            return TypeNode("Observable", type_args=[T])
+
+        # merge(other: Observable<T>) → Observable<T>
+        if method == "merge":
+            if len(expr.args) != 1:
+                raise TypeError_("merge() requires an Observable<T> argument", expr)
+            other_type = self.check_expr(expr.args[0])
+            if other_type.name not in ("Subject", "Observable"):
+                raise TypeError_(f"merge() requires Observable<T>, got {other_type}", expr.args[0])
+            return TypeNode("Observable", type_args=[T])
+
+        # subscribe(fn(T)->void) → Subscription
+        # subscribe(fn(T)->void, fn(string)->void, fn()->void) → Subscription
+        if method == "subscribe":
+            if len(expr.args) not in (1, 3):
+                raise TypeError_("subscribe() requires 1 or 3 arguments", expr)
+            for arg in expr.args:
+                self.check_expr(arg)
+            return TypeNode("Subscription")
+
+        raise TypeError_(f"Subject/Observable has no method '{method}'", expr)

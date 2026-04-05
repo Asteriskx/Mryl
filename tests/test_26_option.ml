@@ -5,17 +5,34 @@
 //   C. 関数戻り値 Option - Some パス
 //   D. 関数戻り値 Option - None パス
 //   E. ゼロ除算を Option で安全に捌く (MC/DC)
+//   F. Option<StructType>: struct型を内部型に持つ Option (#76 関連)
 //
 // カバレッジ観点:
 //   C0  : Some/None 式生成関数戻値match 全アームを少なくとも1回実行
 //   C1  :
 //     A/B: match の Some アーム / None アーム 両方を実行
 //     E  : safe_divide() の if(b==0) true(None)/false(Some) 両ブランチを実行
+//     F  : Option<Point> の Some/None 両アームを実行
 //   MC/DC:
 //     safe_divide() 内 (b == 0):
 //       {b==0=F}  Some  (単一条件なので C1 = MC/DC)
 //       {b==0=T}  None
 // ============================================================
+
+// ----------------------------------------------------------
+// F. Option<StructType>
+// ----------------------------------------------------------
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+fn find_point(flag: bool) -> Option<Point> {
+    if (flag) {
+        return Some(Point { x: 3, y: 4 });
+    }
+    return None;
+}
 
 // ----------------------------------------------------------
 // C/D. Option を返す場合分け関数
@@ -106,6 +123,31 @@ fn main() -> i32 {
         None    => -2,
     };
     println("10/0={}", r6);
+
+    // ----------------------------------------------------------
+    // F. Option<StructType> [C1]
+    //   T26-F1: Some(Point) → x/y を取り出す
+    //   T26-F2: None → デフォルト値
+    // ----------------------------------------------------------
+    println("--- F: Option<StructType> ---");
+    let f1 = find_point(true);
+    let fx: i32 = match f1 {
+        Some(p) => p.x,
+        None    => -1,
+    };
+    let fy: i32 = match find_point(true) {
+        Some(p) => p.y,
+        None    => -1,
+    };
+    println("point.x={}", fx);     // 3
+    println("point.y={}", fy);     // 4
+
+    let f2 = find_point(false);
+    let fn_val: i32 = match f2 {
+        Some(p) => p.x,
+        None    => 0,
+    };
+    println("none.x={}", fn_val);  // 0
 
     println("=== OK ===");
     return 0;

@@ -176,6 +176,22 @@ class CodeGeneratorGenericMixin(_CodeGeneratorBase):
 
         if expr_class == "MethodCall":
             obj_t = self._infer_expr_type(expr.obj)
+
+            # Subject<T> / Observable<T> のメソッド戻り値型
+            # env には "Subject_T" / "Observable_T" 形式で登録される
+            if (obj_t.startswith("Subject_") or obj_t.startswith("Observable_") or
+                    obj_t.startswith("MrylSubject_")):
+                if "_" in obj_t:
+                    T_suffix = obj_t.split("_", 1)[1].rstrip("*").strip()
+                else:
+                    T_suffix = "i32"
+                if expr.method in ("filter", "map", "take", "skip", "merge"):
+                    return f"Observable_{T_suffix}"
+                if expr.method == "subscribe":
+                    return "Subscription"
+                if expr.method in ("emit", "complete", "error", "unsubscribe"):
+                    return "void"
+
             if obj_t == "Result" or obj_t.startswith("Result_"):
                 if expr.method in ("is_ok", "is_err"):
                     return "bool"

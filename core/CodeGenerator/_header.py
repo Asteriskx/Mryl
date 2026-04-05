@@ -74,6 +74,53 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
                 walk_stmt(func.body)
         return types
 
+    def _collect_combinator_types(self, program) -> dict:
+        """AST を走査して Task::when_all / when_any の使用型を収集する。
+        T は LetDecl の型注釈から取得する（型推論環境が未構築のため _infer_expr_type は使えない）。
+        戻り値: { T_name: set_of_combinators }  例: {"i32": {"when_all"}}
+        """
+        result = {}
+
+        def check_let(s):
+            """LetDecl が `let x: T = await Task::when_*(...)` の形か確認し型を登録する。"""
+            ie = s.init_expr
+            if ie is None or ie.__class__.__name__ != 'AwaitExpr':
+                return
+            inner = ie.expr
+            if inner.__class__.__name__ != 'EnumVariantExpr':
+                return
+            if inner.enum_name != 'Task' or inner.variant_name not in ('when_all', 'when_any'):
+                return
+            if not inner.args or not hasattr(inner.args[0], 'elements'):
+                return
+            # 型注釈から T を取得（when_all: i32[]→"i32"、when_any: i32→"i32"）
+            t = s.type_node
+            if t is None:
+                return
+            T_name = t.name  # TypeNode("i32", array_size=-1).name == "i32"
+            result.setdefault(T_name, set()).add(inner.variant_name)
+
+        def walk_stmt(s):
+            if s is None:
+                return
+            cls = s.__class__.__name__
+            if cls == 'LetDecl':
+                check_let(s)
+            elif cls == 'Block':
+                for st in s.statements:
+                    walk_stmt(st)
+            elif cls == 'IfStmt':
+                walk_stmt(s.then_block)
+                if s.else_block:
+                    walk_stmt(s.else_block)
+            elif cls in ('WhileStmt', 'ForStmt'):
+                walk_stmt(s.body)
+
+        for func in program.functions:
+            if func.body:
+                walk_stmt(func.body)
+        return result
+
     def _emit_vec_helpers(self, elem_types: set):
         """MrylVec_<T> 構造体とヘルパー関数を出力する。
         "Box_T" 形式の要素型は T* ポインタ型として扱う（Vec<Box<T>> サポート）。
@@ -131,6 +178,14 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
             self._emit(f"    v->data[idx] = val;")
             self._emit(f"    v->len++;")
             self._emit(f"}}")
+            # string 要素の場合は各要素の char* も解放するデストラクタを追加する。
+            # 通常の free(v.data) では MrylString 構造体の配列しか解放されず、
+            # 内部の char* がリークするため専用の free 関数が必要。
+            if T == "string":
+                self._emit(f"static inline void mryl_vec_string_free(MrylVec_string v) {{")
+                self._emit(f"    for (int32_t i = 0; i < v.len; i++) free_mryl_string(v.data[i]);")
+                self._emit(f"    free(v.data);")
+                self._emit(f"}}")
             self._emit(f"")
 
     def _emit_builtin_functions(self):
@@ -425,6 +480,313 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
         self.indent_level -= 1
         self._emit("}")
         self._emit("")
+
+    def _collect_subject_types(self, program) -> set:
+        """AST を走査して Subject<T> の要素型名を収集する。"""
+        found = set()
+        def _scan_type(tn):
+            if tn is None:
+                return
+            if hasattr(tn, 'name') and tn.name in ("Subject", "Observable"):
+                if tn.type_args:
+                    arg = tn.type_args[0]
+                    found.add(arg.name if hasattr(arg, 'name') else str(arg))
+            if hasattr(tn, 'type_args'):
+                for a in (tn.type_args or []):
+                    _scan_type(a)
+
+        def _scan_expr(expr):
+            if expr is None:
+                return
+            if expr.__class__.__name__ == "EnumVariantExpr" and expr.enum_name == "Subject":
+                T = getattr(expr, '_subject_elem_type', None)
+                if T:
+                    found.add(T)
+                for ta in (expr.type_args or []):
+                    if hasattr(ta, 'name'):
+                        found.add(ta.name)
+                    elif isinstance(ta, str):
+                        found.add(ta)
+            for attr in ('expr', 'obj', 'left', 'right', 'init_expr', 'condition', 'then_expr', 'else_expr'):
+                _scan_expr(getattr(expr, attr, None))
+            for lst_attr in ('args', 'elements'):
+                for child in getattr(expr, lst_attr, None) or []:
+                    _scan_expr(child)
+
+        def _scan_stmt(stmt):
+            if stmt is None:
+                return
+            for attr in ('init_expr', 'expr', 'condition', 'value'):
+                _scan_expr(getattr(stmt, attr, None))
+            for lst_attr in ('body', 'then_body', 'else_body', 'stmts'):
+                val = getattr(stmt, lst_attr, None)
+                if val is None:
+                    continue
+                # Block オブジェクトは .statements を持つ。リストの場合はそのまま使う。
+                stmts_list = val.statements if hasattr(val, 'statements') else val
+                for child in (stmts_list or []):
+                    _scan_stmt(child)
+            _scan_type(getattr(stmt, 'type_node', None))
+
+        for func in program.functions:
+            for stmt in (func.body.statements if func.body else []):
+                _scan_stmt(stmt)
+        return found
+
+    def _emit_subject_helpers(self, elem_types: set):
+        """MrylSubject_T / MrylSubscription_T 構造体・関数を出力する。
+        C# Rx.NET のパイプライン設計に対応：emit → 購読者リストを順に呼ぶ。
+        """
+        if not elem_types:
+            return
+
+        _type_map = {
+            'i8': 'int8_t', 'i16': 'int16_t', 'i32': 'int32_t', 'i64': 'int64_t',
+            'u8': 'uint8_t', 'u16': 'uint16_t', 'u32': 'uint32_t', 'u64': 'uint64_t',
+            'f32': 'float', 'f64': 'double', 'bool': 'int', 'string': 'MrylString',
+        }
+
+        self._emit("// ============================================================")
+        self._emit("// Observable<T> / Subject<T> ランタイム（#45）")
+        self._emit("// ============================================================")
+        self._emit("")
+
+        # 型非依存の汎用 Subscription アンサブスクライブ
+        # MrylSubscription_T は先頭に 4 つのポインタ（on_next/on_error/on_complete/ctx）を持ち、
+        # その直後に active フラグが来るため、型ごとの関数を使わずに void* でキャスト可能。
+        self._emit("typedef struct { void *__p0, *__p1, *__p2, *__p3; int active; } MrylSubscriptionBase;")
+        self._emit("static inline void mryl_subscription_unsubscribe(void* sub) {")
+        self.indent_level += 1
+        self._emit("if (sub) ((MrylSubscriptionBase*)sub)->active = 0;")
+        self.indent_level -= 1
+        self._emit("}")
+        self._emit("")
+
+        for T in sorted(elem_types):
+            ct = _type_map.get(T, T)
+            suffix = T  # 型サフィックス（例: i32）
+
+            # コールバック関数ポインタ型
+            self._emit(f"typedef void (*MrylOnNext_{suffix})({ct}, void*);")
+            self._emit(f"typedef void (*MrylOnError_{suffix})(MrylString, void*);")
+            self._emit(f"typedef void (*MrylOnComplete_{suffix})(void*);")
+            self._emit("")
+
+            # Subscription 構造体（購読者単位）
+            self._emit(f"typedef struct MrylSubscription_{suffix} {{")
+            self.indent_level += 1
+            self._emit(f"MrylOnNext_{suffix}     on_next;")
+            self._emit(f"MrylOnError_{suffix}    on_error;")
+            self._emit(f"MrylOnComplete_{suffix} on_complete;")
+            self._emit("void*                   ctx;     // クロージャ環境（fat pointer の env）")
+            self._emit("int                     active;  // 1=購読中 0=解除済み")
+            self._emit(f"struct MrylSubscription_{suffix}* next;  // 連結リスト")
+            self.indent_level -= 1
+            self._emit(f"}} MrylSubscription_{suffix};")
+            self._emit("")
+
+            # Subject 構造体
+            self._emit(f"typedef struct {{")
+            self.indent_level += 1
+            self._emit(f"MrylSubscription_{suffix}* subscribers;  // 購読者連結リスト先頭")
+            self._emit("int completed;")
+            self._emit("int errored;")
+            self.indent_level -= 1
+            self._emit(f"}} MrylSubject_{suffix};")
+            self._emit("")
+
+            # Subject_new
+            self._emit(f"static inline MrylSubject_{suffix}* mryl_subject_{suffix}_new(void) {{")
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* s = (MrylSubject_{suffix}*)malloc(sizeof(MrylSubject_{suffix}));")
+            self._emit("s->subscribers = NULL; s->completed = 0; s->errored = 0;")
+            self._emit("return s;")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # subscribe（on_next のみ版）
+            self._emit(f"static inline MrylSubscription_{suffix}* mryl_subject_{suffix}_subscribe(")
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* s, MrylOnNext_{suffix} on_next,")
+            self._emit(f"MrylOnError_{suffix} on_error, MrylOnComplete_{suffix} on_complete, void* ctx) {{")
+            self.indent_level -= 1
+            self.indent_level += 1
+            self._emit(f"MrylSubscription_{suffix}* sub = (MrylSubscription_{suffix}*)malloc(sizeof(MrylSubscription_{suffix}));")
+            self._emit("sub->on_next = on_next; sub->on_error = on_error; sub->on_complete = on_complete;")
+            self._emit("sub->ctx = ctx; sub->active = 1;")
+            self._emit("sub->next = s->subscribers; s->subscribers = sub;")
+            self._emit("return sub;")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # emit
+            self._emit(f"static inline void mryl_subject_{suffix}_emit(MrylSubject_{suffix}* s, {ct} val) {{")
+            self.indent_level += 1
+            self._emit("if (s->completed || s->errored) return;")
+            self._emit(f"MrylSubscription_{suffix}* cur = s->subscribers;")
+            self._emit("while (cur) {")
+            self.indent_level += 1
+            self._emit("if (cur->active && cur->on_next) cur->on_next(val, cur->ctx);")
+            self._emit("cur = cur->next;")
+            self.indent_level -= 1
+            self._emit("}")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # complete
+            self._emit(f"static inline void mryl_subject_{suffix}_complete(MrylSubject_{suffix}* s) {{")
+            self.indent_level += 1
+            self._emit("s->completed = 1;")
+            self._emit(f"MrylSubscription_{suffix}* cur = s->subscribers;")
+            self._emit("while (cur) {")
+            self.indent_level += 1
+            self._emit("if (cur->active && cur->on_complete) cur->on_complete(cur->ctx);")
+            self._emit("cur = cur->next;")
+            self.indent_level -= 1
+            self._emit("}")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # error
+            self._emit(f"static inline void mryl_subject_{suffix}_error(MrylSubject_{suffix}* s, MrylString msg) {{")
+            self.indent_level += 1
+            self._emit("s->errored = 1;")
+            self._emit(f"MrylSubscription_{suffix}* cur = s->subscribers;")
+            self._emit("while (cur) {")
+            self.indent_level += 1
+            self._emit("if (cur->active && cur->on_error) cur->on_error(msg, cur->ctx);")
+            self._emit("cur = cur->next;")
+            self.indent_level -= 1
+            self._emit("}")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # unsubscribe（型別版：互換性のために残す）
+            self._emit(f"static inline void mryl_subscription_{suffix}_unsubscribe(MrylSubscription_{suffix}* sub) {{")
+            self.indent_level += 1
+            self._emit("if (sub) sub->active = 0;")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # ── オペレータ（パイプライン方式：上流 Subject に subscribe し下流 Subject へ転送）──
+
+            # merge: 2 ソースから同一下流 Subject へ転送
+            # コールバックは ctx (void*) を MrylSubject_T* として直接 emit する
+            self._emit(f"static void __mryl_merge_on_next_{suffix}({ct} val, void* ctx) {{")
+            self.indent_level += 1
+            self._emit(f"mryl_subject_{suffix}_emit((MrylSubject_{suffix}*)ctx, val);")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit(f"static inline MrylSubject_{suffix}* mryl_subject_{suffix}_merge(")
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* s1, MrylSubject_{suffix}* s2) {{")
+            self.indent_level -= 1
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* ds = mryl_subject_{suffix}_new();")
+            self._emit(f"mryl_subject_{suffix}_subscribe(s1, __mryl_merge_on_next_{suffix}, NULL, NULL, ds);")
+            self._emit(f"mryl_subject_{suffix}_subscribe(s2, __mryl_merge_on_next_{suffix}, NULL, NULL, ds);")
+            self._emit("return ds;")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # filter: 述語を満たす値のみ下流へ転送
+            self._emit(f"typedef struct {{ MrylSubject_{suffix}* ds; int (*fn)({ct}, void*); void* env; }} MrylFilterCtx_{suffix};")
+            self._emit(f"static void __mryl_filter_on_next_{suffix}({ct} val, void* ctx) {{")
+            self.indent_level += 1
+            self._emit(f"MrylFilterCtx_{suffix}* c = (MrylFilterCtx_{suffix}*)ctx;")
+            self._emit(f"if (c->fn(val, c->env)) mryl_subject_{suffix}_emit(c->ds, val);")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit(f"static inline MrylSubject_{suffix}* mryl_subject_{suffix}_filter(")
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* s, int (*pred)({ct}, void*), void* pred_ctx) {{")
+            self.indent_level -= 1
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* ds = mryl_subject_{suffix}_new();")
+            self._emit(f"MrylFilterCtx_{suffix}* ctx = (MrylFilterCtx_{suffix}*)malloc(sizeof(MrylFilterCtx_{suffix}));")
+            self._emit(f"ctx->ds = ds; ctx->fn = pred; ctx->env = pred_ctx;")
+            self._emit(f"mryl_subject_{suffix}_subscribe(s, __mryl_filter_on_next_{suffix}, NULL, NULL, ctx);")
+            self._emit("return ds;")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # map: 変換関数を適用した値を下流へ転送
+            self._emit(f"typedef struct {{ MrylSubject_{suffix}* ds; {ct} (*fn)({ct}, void*); void* env; }} MrylMapCtx_{suffix};")
+            self._emit(f"static void __mryl_map_on_next_{suffix}({ct} val, void* ctx) {{")
+            self.indent_level += 1
+            self._emit(f"MrylMapCtx_{suffix}* c = (MrylMapCtx_{suffix}*)ctx;")
+            self._emit(f"mryl_subject_{suffix}_emit(c->ds, c->fn(val, c->env));")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit(f"static inline MrylSubject_{suffix}* mryl_subject_{suffix}_map(")
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* s, {ct} (*mapper)({ct}, void*), void* mapper_ctx) {{")
+            self.indent_level -= 1
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* ds = mryl_subject_{suffix}_new();")
+            self._emit(f"MrylMapCtx_{suffix}* ctx = (MrylMapCtx_{suffix}*)malloc(sizeof(MrylMapCtx_{suffix}));")
+            self._emit(f"ctx->ds = ds; ctx->fn = mapper; ctx->env = mapper_ctx;")
+            self._emit(f"mryl_subject_{suffix}_subscribe(s, __mryl_map_on_next_{suffix}, NULL, NULL, ctx);")
+            self._emit("return ds;")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # take: 先頭 n 件のみ下流へ転送
+            self._emit(f"typedef struct {{ MrylSubject_{suffix}* ds; int remaining; }} MrylTakeCtx_{suffix};")
+            self._emit(f"static void __mryl_take_on_next_{suffix}({ct} val, void* ctx) {{")
+            self.indent_level += 1
+            self._emit(f"MrylTakeCtx_{suffix}* c = (MrylTakeCtx_{suffix}*)ctx;")
+            self._emit("if (c->remaining > 0) { c->remaining--;")
+            self.indent_level += 1
+            self._emit(f"mryl_subject_{suffix}_emit(c->ds, val); }}")
+            self.indent_level -= 1
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit(f"static inline MrylSubject_{suffix}* mryl_subject_{suffix}_take(")
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* s, int n) {{")
+            self.indent_level -= 1
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* ds = mryl_subject_{suffix}_new();")
+            self._emit(f"MrylTakeCtx_{suffix}* ctx = (MrylTakeCtx_{suffix}*)malloc(sizeof(MrylTakeCtx_{suffix}));")
+            self._emit(f"ctx->ds = ds; ctx->remaining = n;")
+            self._emit(f"mryl_subject_{suffix}_subscribe(s, __mryl_take_on_next_{suffix}, NULL, NULL, ctx);")
+            self._emit("return ds;")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+
+            # skip: 先頭 n 件をスキップして残りを下流へ転送
+            self._emit(f"typedef struct {{ MrylSubject_{suffix}* ds; int remaining; }} MrylSkipCtx_{suffix};")
+            self._emit(f"static void __mryl_skip_on_next_{suffix}({ct} val, void* ctx) {{")
+            self.indent_level += 1
+            self._emit(f"MrylSkipCtx_{suffix}* c = (MrylSkipCtx_{suffix}*)ctx;")
+            self._emit(f"if (c->remaining > 0) c->remaining--;")
+            self._emit(f"else mryl_subject_{suffix}_emit(c->ds, val);")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit(f"static inline MrylSubject_{suffix}* mryl_subject_{suffix}_skip(")
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* s, int n) {{")
+            self.indent_level -= 1
+            self.indent_level += 1
+            self._emit(f"MrylSubject_{suffix}* ds = mryl_subject_{suffix}_new();")
+            self._emit(f"MrylSkipCtx_{suffix}* ctx = (MrylSkipCtx_{suffix}*)malloc(sizeof(MrylSkipCtx_{suffix}));")
+            self._emit(f"ctx->ds = ds; ctx->remaining = n;")
+            self._emit(f"mryl_subject_{suffix}_subscribe(s, __mryl_skip_on_next_{suffix}, NULL, NULL, ctx);")
+            self._emit("return ds;")
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
 
     def _emit_header(self):
         """組み込み型・関数をまとめて出力する (内部利用) """

@@ -1,8 +1,9 @@
 from Ast import *
 from MrylError import *
+from TypeChecker._proto import _TypeCheckerBase
 
 
-class TypeCheckerStmtMixin:
+class TypeCheckerStmtMixin(_TypeCheckerBase):
     """文（Statement）レベルの型チェックを担当する Mixin。
 
     check_block / check_statement / check_let / check_const_decl /

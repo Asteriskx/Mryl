@@ -1,7 +1,7 @@
-﻿# Mryl プログラミング言語 - 完全仕様書
+﻿# Mryl プログラミング言語 - 言語詳細仕様書
 
-**バージョン**: 0.5.0
-**最終更新**: 2026年3月14日
+**バージョン**: 0.6.0
+**最終更新**: 2026年4月5日
 
 ---
 
@@ -136,7 +136,17 @@ Mryl/
 │   ├── test_32_iter_chain_free.ml   # チェーン中間 MrylVec のメモリ解放（#62）
 │   ├── test_33_select_many.ml       # select_many C コード生成（#65、C0/C1/MC/DC）
 │   ├── test_34_closure_capture.ml   # クロージャキャプチャ fat pointer（#44、C0/C1/MC/DC）
-│   └── test_35_box_free.ml          # Box<T> 自動 free（スコープ・return・ループ・多重・Vec<Box<T>>、#66）
+│   ├── test_35_box_free.ml          # Box<T> 自動 free（スコープ・return・ループ・多重・Vec<Box<T>>、#66）
+│   ├── test_36_for_each_void_stmt.ml    # for_each void 文式・キャプチャあり fat pointer ラムダ（#64）
+│   ├── test_37_iter_lambda_typecheck.ml # Iter<T> メソッドへのラムダ引数型検査（#63、C0/C1/MC/DC）
+│   ├── test_38_async_result.ml          # async fn + Result<T,E> FAULTED 状態伝播（#51）
+│   ├── test_39_toarray_free.ml          # to_array() 結果 MrylVec の自動 free（#71、C0/C1）
+│   ├── test_40_struct_box_free.ml       # struct フィールド Box<T> free / Option<Box<T>> free（#67/#68）
+│   ├── test_41_iter_string_deep_copy.ml # Iter<string> first()/filter()/skip() deep copy（#70）
+│   ├── test_42_iter_lambda_param_count.ml # Iter<T> ラムダ引数数チェック（#69、C0）
+│   ├── test_43_task_when_all_any.ml     # Task::when_all / Task::when_any コンビネータ（#61、C0/C1）
+│   ├── test_44_async_cancel.ml          # weak / cancel Task キャンセル機構（#52、C0/C1）
+│   └── test_45_observable.ml            # Observable<T> / Subject<T> リアクティブストリーム（#45、C0/C1）
 ├── my/                               # 動作確認用 Mryl コード置き場
 ├── bin/
 │   ├── Mryl.c                # 生成された C ソースコード
@@ -204,9 +214,118 @@ Mryl/
 | `let v: T = await h` | 完了待機 + 戻り値取得 |
 | `await h` | void 非同期の完了待機 |
 | `Future<T>` | 非同期タスクの型。C コードでは `MrylTask*` |
+| `WeakTask<T>` | Task への弱参照型。C コードでは `MrylTask*`（weak_count で管理）|
+| `weak(handle)` | `Future<T>` から `WeakTask<T>` を取得する組み込み式 |
+| `cancel(token)` | `WeakTask<T>` 経由で Task をキャンセルする組み込み関数 |
 | C コード生成 | SM 構造体 + `move_next` 関数 + ファクトリ関数 + スケジューラ |
 
-### 3.6 条件付きコンパイル
+#### Task コンビネータ（v0.6.0）
+
+複数の `Future<T>` を同時に待機する静的メソッド群。
+
+| API | シグネチャ | 説明 |
+|-----|-----------|------|
+| `Task::when_all` | `([t1, t2, ...]: Future<T>[]) -> Future<T[]>` | 全タスク完了後に結果配列を返す（C# `Task.WhenAll` 相当） |
+| `Task::when_any` | `([t1, t2, ...]: Future<T>[]) -> Future<T>` | 最初に完了したタスクの結果を返す（C# `Task.WhenAny` 相当） |
+
+**使用例:**
+```mryl
+let t1 = fetch(1);
+let t2 = fetch(2);
+let results: i32[] = await Task::when_all([t1, t2]);  // [result1, result2]
+let first: i32     = await Task::when_any([t1, t2]);  // 最初に完了した値
+```
+
+**制限（v0.6.0）:**
+- 要素型 `T` は `void` 不可（`void` Task のコンビネータ非対応）
+- 要素型 `T` は `Result<T,E>` 不可（v0.7.0 候補 issue #XX）
+- 全要素が同一型 `T` であること（混在型不可）
+
+#### Task キャンセル（v0.6.0）
+
+`weak(handle)` で `Future<T>` への弱参照 `WeakTask<T>` を取得し、`cancel(token)` でキャンセルする。
+
+```mryl
+async fn long_task(n: i32) -> i32 { return n * 2; }
+
+fn main() {
+    let handle = long_task(42);
+    let token: WeakTask<i32> = weak(handle);  // 弱参照取得
+
+    cancel(token);  // Task をキャンセル（handle は await しない）
+}
+```
+
+**設計規約:**
+- キャンセルは「Task を捨てる」操作。キャンセル後は `handle` を `await` しない
+- `cancel()` は冪等（完了済み・キャンセル済みの Task に対して何もしない）
+- `WeakTask<T>` は `await` 不可（TypeChecker でエラー）
+
+**タイムアウトパターン（`when_any` との組み合わせ）:**
+```mryl
+let handle = long_process();
+let timer  = delay(5000);
+let tok_h: WeakTask<i32> = weak(handle);
+
+let _: i32 = await Task::when_any([handle, timer]);
+cancel(tok_h);  // タイムアウトした場合に handle をキャンセル
+```
+
+**C コード生成:**
+| Mryl 構文 | 生成 C コード |
+|-----------|-------------|
+| `weak(handle)` | `__task_weak_retain(handle)` |
+| `cancel(token)` | `__task_cancel(token)` |
+| `WeakTask<T>` 型 | `MrylTask*` |
+
+### 3.6 Observable\<T\> / Subject\<T\>（リアクティブストリーム、v0.6.0）
+
+C# Rx.NET と同じパイプライン設計のリアクティブストリーム。
+
+| 型 / 概念 | 説明 |
+|-----------|------|
+| `Subject<T>` | イベントの発信源。subscribe の登録先 |
+| `Observable<T>` | パイプライン（filter/map 等の変換後のストリーム） |
+| `Subscription` | 購読を管理するハンドル。`unsubscribe()` で解除 |
+
+**Subject<T> API:**
+
+| 式 / 文 | 説明 |
+|---------|------|
+| `Subject<T>::new()` | 新しい Subject を作成（C: `mryl_subject_T_new()`） |
+| `s.emit(val)` | 購読者全員に値を送信 |
+| `s.complete()` | 完了通知（以降の emit 無視） |
+| `s.error(msg)` | エラー通知（以降の emit 無視） |
+| `s.subscribe(on_next)` | 購読登録（`Subscription` 返し） |
+| `s.subscribe(on_next, on_error, on_complete)` | 3 ハンドラ版 |
+| `s.filter(pred)` | 述語を満たす値のみ通過する `Observable<T>` |
+| `s.map(mapper)` | 値を変換した `Observable<T>` |
+| `s.take(n)` | 先頭 n 件のみ通過する `Observable<T>` |
+| `s.skip(n)` | 先頭 n 件をスキップする `Observable<T>` |
+| `s.merge(other)` | 2 ソースを合流する `Observable<T>` |
+| `sub.unsubscribe()` | 購読解除（C: `mryl_subscription_unsubscribe(sub)`） |
+
+**型パラメータ T:** 数値型・`string`・ユーザー定義 `struct` に対応。
+
+**C コード生成:** モノモーフ化方式。`Subject<i32>` → `MrylSubject_i32*` として型ごとに展開。  
+オペレータは新しい Subject を生成して上流に subscribe 登録するパイプライン方式。
+
+```mryl
+let s: Subject<i32> = Subject<i32>::new();
+let obs: Observable<i32> = s
+    .filter((x: i32) => { return x > 0; })
+    .map((x: i32)    => { return x * 10; });
+let sub: Subscription = obs.subscribe((x: i32) => { println("{}", x); });
+s.emit(-1);  // スキップ
+s.emit(3);   // 30
+sub.unsubscribe();
+```
+
+**制限（v0.6.0）:**
+- `debounce()` / `next_async()` オペレータは v0.7.0 候補（issue 化済み）
+- Subject のバックプレッシャー制御なし
+
+### 3.8 条件付きコンパイル
 
 | ディレクティブ | 説明 | 例 |
 |----------|------|-----|
@@ -221,7 +340,7 @@ Mryl/
 - Parser で ConditionalBlock AST 構築
 - CodeGenerator で条件評価 → 該当ブロックのみコンパイル
 
-### 3.7 数値型型昇格システム
+### 3.9 数値型型昇格システム
 
 二項演算で型が異なる場合、自動的に上位の型に昇格：
 
@@ -234,7 +353,7 @@ Mryl/
 - 例: i32 + f32 → f64, u16 + u64 → u64
 ```
 
-### 3.8 fn 型パラメータ（高階関数・コールバック）
+### 3.10 fn 型パラメータ（高階関数・コールバック）
 
 | 機能 | 説明 |
 |------|------|
@@ -243,9 +362,9 @@ Mryl/
 | `fn f(cb: fn(i32) -> void, ...)` | void 戻り値の関数型 |
 | ラムダ変数を渡す | `apply(double, 5)` — ラムダをコールバックとして渡す |
 | 名前付き関数を渡す | `apply(my_func, 5)` — 定義済み関数を渡す |
-| C コード生成 | `型 (*cb)(パラメータ)` の関数ポインタ型 |
+| C コード生成 | `MrylFn_*` fat pointer 構造体（`{fn_ptr, env}`）。名前付き関数を渡す場合は `void* __e` 付き thunk を自動生成して fat pointer でラップ |
 
-### 3.9 static fn（静的メソッド）
+### 3.11 static fn（静的メソッド）
 
 | 機能 | 説明 |
 |------|------|
@@ -291,6 +410,9 @@ Mryl/
 | 自動 free（ループ） | while / for の各イテレーション末に `_emit_loop_iteration_cleanup` で free |
 | `Box<Box<T>>` inner_moved | `let X: Box<T> = *Y` パターンで `Y` を `box_inner_moved` にマーク → `free(Y)` のみ（二重 free 防止） |
 | `Box<T>[]`（`Vec<Box<T>>`） | 要素ごと free 後に `.data` を free（`_emit_box_vec_free`） |
+| struct Box フィールド自動デストラクタ | Box フィールドを持つ struct に `mryl_free_StructName()` を自動生成。ネスト struct は再帰呼び出し。`_struct_has_box_fields()` で循環参照防止付き判定 |
+| struct Box フィールド自動 free | struct 変数をスコープ終了・return・ループイテレーション末に `mryl_free_StructName()` で解放（`local_struct_box_vars` で追跡）。VarRef フィールドは所有権移動とみなし double free 防止 |
+| `Option<Box<T>>` 自動 free | `Option<Box<T>>` 変数を `local_option_box_vars` で追跡。スコープ終了・return 時に `if(has_value) free(value)` を emit |
 | TypeChecker | `Box<T>` → `TypeNode("Box", type_args=[inner])` |
 | CodeGenerator | `Box<T>` → `T*`、`Box::new(v)` → `({ T* p = malloc(sizeof(T)); *p = v; p; })` |
 | ユーザー定義構造体との共存 | `generate()` 開始時に `has_user_box` をキャッシュ。`struct Box` が存在する場合は組み込み Box を無効化 |
@@ -380,6 +502,9 @@ arr.for_each(...);            // OK: 文として使用
 | 中間 `MrylVec` のメモリリーク | `issue_iter_intermediate_memleak.md` | ✅ v0.5.0 #62 解決 |
 | `for_each` void statement expression の GCC 拡張依存 | `issue_iter_for_each_void_stmtexpr.md` | ✅ v0.5.0 #64 解決 |
 | ラムダ引数型検査が浅い | `issue_iter_lambda_typecheck_shallow.md` | ⚠️ #63 未対応 |
+| ラムダ引数数チェック未実装 | `issue_iter_lambda_param_count.md` | ✅ v0.6.0 #69 解決 |
+| `for_each` ラムダ内ミュータブルキャプチャ非対応 | `issue_for_each_mutable_capture.md` | ⚠️ #83 v0.7.0 候補 |
+| 多次元配列（`i32[][]` 以上）未対応 | `issue_2d_array_unsupported.md` | ⚠️ #82 v0.7.0 候補 |
 | `select_many` VarRef ラムダ時の所有権 | — | ⚠️ 将来の所有権機能で対応予定 |
 
 ---
@@ -736,6 +861,26 @@ let pair = Pair { first: 10, second: 20 };
 let x = pair.get_first();  // → Pair_T_get_first(pair)
 ```
 
+### Box フィールドを持つ struct の自動デストラクタ
+
+`Box<T>` 型フィールドを持つ struct に対し、コンパイラは `mryl_free_StructName()` を自動生成する。
+struct 変数はスコープ終了・`return` 前・ループイテレーション末に自動解放される。
+
+| 項目 | 内容 |
+|------|------|
+| デストラクタ生成条件 | `_struct_has_box_fields()` で Box フィールドの有無を再帰判定（循環参照防止付き） |
+| Box フィールド | `free(s.field)` を emit |
+| ネスト struct フィールド | `mryl_free_Inner(s.field)` を再帰的に emit |
+| 追跡変数 | `local_struct_box_vars` で struct 変数を管理 |
+| double free 防止 | `StructInit` での `VarRef` フィールドは所有権移動とみなし追跡対象から除外 |
+
+```c
+// 生成例
+void mryl_free_Node(Node s) {
+    free(s.data);
+}
+```
+
 ---
 
 ## static fn（静的メソッド）
@@ -789,7 +934,11 @@ let c2 = make(Counter::zero);             // コールバックとして渡す
 |---|---|
 | `static fn zero() -> Counter` 宣言 | `Counter Counter_zero()` |
 | `Counter::zero()` | `Counter_zero()` |
-| `Counter::zero`（参照） | `Counter_zero`（関数ポインタ） |
+| `Counter::zero`（単純参照） | `Counter_zero`（関数ポインタ） |
+| `Counter::zero`（`fn()->Counter` 型引数・変数代入） | thunk + fat pointer `MrylFn_void_ret_Counter` |
+
+> `fn(T)->U` 型パラメータへ渡す場合や `fn` 型変数へ代入する場合は、
+> 統一的な fat pointer 規約（`MrylFn_*`）に合わせるため thunk ラッパーが自動生成されます。
 
 ---
 
@@ -1259,7 +1408,19 @@ int main(void) {
 
 ### キャンセル
 
+Mryl 構文の `weak(handle)` / `cancel(token)` が以下の C コードに対応します。
+
+```mryl
+let token: WeakTask<i32> = weak(handle);  // → __task_weak_retain(handle)
+cancel(token);                             // → __task_cancel(token)
+```
+
 ```c
+static inline MrylTask* __task_weak_retain(MrylTask* t) {
+    if (t) t->weak_count++;
+    return t;
+}
+
 static inline void __task_cancel(MrylTask* t) {
     if (!t) return;
     if (t->state == MRYL_TASK_PENDING || t->state == MRYL_TASK_RUNNING) {
@@ -1270,7 +1431,8 @@ static inline void __task_cancel(MrylTask* t) {
 }
 ```
 
-awaiter は `MRYL_TASK_CANCELLED` を確認して結果をデフォルト値（`0` / `NULL`）とします。
+awaiter は `MRYL_TASK_CANCELLED` を確認して結果をデフォルト値（`0` / `NULL`）とします。  
+設計規約として、キャンセルした Task は `await` しません。
 
 ### 実装詳細
 

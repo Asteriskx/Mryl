@@ -128,6 +128,10 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         if expr_class == "AwaitExpr":
             return "/* await - use let statement for typed await */"
 
+        if expr_class == "WeakExpr":
+            inner = self._generate_expr(expr.expr)
+            return f"__task_weak_retain({inner})"
+
         return "0"
 
     def _generate_expr_with_temps(self, expr, temp_string_mapping: dict) -> str:
@@ -146,8 +150,13 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             for scope in reversed(self.env):
                 if expr.name in scope and scope[expr.name] in ('fn', 'fn_closure'):
                     return self._generate_function_call(expr)
-            # Lambda 引数を含む場合は fat pointer 変換が必要なので _generate_function_call に委譲（issue ②）
-            if any(arg.__class__.__name__ == "Lambda" for arg in expr.args):
+            # Lambda / static メソッド参照 / 名前付き関数参照 を含む場合は
+            # fat pointer 変換が必要なので _generate_function_call に委譲（issue ②, #75, #76）
+            if any(
+                arg.__class__.__name__ == "Lambda"
+                or (arg.__class__.__name__ == "EnumVariantExpr" and not arg.has_parens)
+                for arg in expr.args
+            ):
                 return self._generate_function_call(expr)
             # Ok/Err/Some は compound literal 生成が必要なので _generate_function_call に委譲
             if expr.name in ("Ok", "Err", "Some"):
@@ -189,6 +198,11 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         """FunctionCall を C 式文字列として返す """
         if expr.name in ["print", "println"]:
             return self._generate_print_call(expr)
+
+        # cancel(token) — WeakTask<T> をキャンセルする組み込み関数
+        if expr.name == "cancel":
+            arg = self._generate_expr(expr.args[0]) if expr.args else "NULL"
+            return f"__task_cancel({arg})"
 
         if expr.name in ("Ok", "Err"):
             val_code    = self._generate_expr(expr.args[0]) if expr.args else "0"
@@ -234,8 +248,43 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                 return f"_mryl_to_string_bool({arg_code})"
 
         # Lambda 引数を fat pointer struct に変換（issue ②⑧: ブロックスコープ変数でアドレス確保）
-        has_lambda_arg = any(arg.__class__.__name__ == "Lambda" for arg in expr.args)
-        if has_lambda_arg:
+        # 名前付き関数を fn(T)->U 型引数へ渡す場合も fat pointer ラッパーを生成（#75）
+        called_func = self.program_functions.get(expr.name)
+
+        # static メソッドのルックアップ: {C名 -> method} （例: "Point_origin" -> method）
+        # static fn も名前付き関数と同様に fat pointer ラッパーが必要（#76）
+        static_methods = {
+            f"{s.name}_{m.name}": m
+            for s in self.structs
+            for m in s.methods
+            if getattr(m, 'is_static', False)
+        }
+
+        def _is_named_fn_arg(idx: int, arg) -> bool:
+            """引数が名前付き関数参照（またはstatic メソッド参照）かつ
+            対応パラメータが fn(T)->U 型なら True を返す。
+            ローカル変数スコープに同名がある場合は既に MrylFn_* 構造体のため対象外。"""
+            cls = arg.__class__.__name__
+            # static メソッド参照: Point::origin（has_parens=False の EnumVariantExpr）
+            if cls == "EnumVariantExpr" and not arg.has_parens:
+                c_name = f"{arg.enum_name}_{arg.variant_name}"
+                if c_name not in static_methods:
+                    return False
+            elif cls == "VarRef":
+                if any(arg.name in scope for scope in self.env):
+                    return False   # ローカル fn 変数は既に MrylFn_* 構造体
+                if arg.name not in self.program_functions and arg.name not in static_methods:
+                    return False
+            else:
+                return False
+            if called_func is None or idx >= len(called_func.params):
+                return False
+            pt = called_func.params[idx].type_node
+            return pt is not None and pt.name == "fn" and bool(getattr(pt, 'type_args', None))
+
+        has_lambda_arg   = any(arg.__class__.__name__ == "Lambda" for arg in expr.args)
+        has_named_fn_arg = any(_is_named_fn_arg(i, arg) for i, arg in enumerate(expr.args))
+        if has_lambda_arg or has_named_fn_arg:
             args_list = []
             for i, arg in enumerate(expr.args):
                 if arg.__class__.__name__ == "Lambda":
@@ -259,6 +308,37 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                         args_list.append(f"({fn_c_type}){{{lam_name_v}, &{env_var}}}")
                     else:
                         args_list.append(f"({fn_c_type}){{{lam_name_v}, NULL}}")
+                elif _is_named_fn_arg(i, arg):
+                    # 名前付き関数 / static メソッド → void* __e 付き thunk を生成して fat pointer に包む（#75, #76）
+                    # pending_lambdas により thunk は関数前方に static 関数として出力される
+                    # EnumVariantExpr(Point::origin) は c_func_name="Point_origin", fn_decl=static method
+                    if arg.__class__.__name__ == "EnumVariantExpr":
+                        c_func_name = f"{arg.enum_name}_{arg.variant_name}"
+                        fn_decl     = static_methods[c_func_name]
+                    else:
+                        c_func_name = arg.name
+                        fn_decl     = self.program_functions.get(arg.name) or static_methods[arg.name]
+                    thunk_name   = f"__thunk_{self.thunk_counter}"
+                    self.thunk_counter += 1
+                    t_params_c   = [
+                        f"{self._type_to_c(p.type_node) if p.type_node else 'int32_t'} {p.name}"
+                        for p in fn_decl.params
+                    ]
+                    t_params_str = ", ".join(t_params_c)
+                    t_ret        = self._type_to_c(fn_decl.return_type) if fn_decl.return_type else "void"
+                    call_args    = ", ".join(p.name for p in fn_decl.params)
+                    ret_kw       = "return " if t_ret != "void" else ""
+                    # thunk 本体: c_func_name = C 関数名（static メソッドは "Struct_method" 形式）
+                    self.pending_lambdas.append(
+                        (thunk_name, t_ret, t_params_str, [f"    {ret_kw}{c_func_name}({call_args});"], {})
+                    )
+                    arg_cs_t = [self._type_to_c(p.type_node) if p.type_node else "int32_t" for p in fn_decl.params]
+                    self.lambda_captures[thunk_name] = {'captures': {}, 'ret_c': t_ret, 'arg_cs': arg_cs_t}
+                    pt        = called_func.params[i].type_node
+                    fn_c_type = self._type_to_c(pt)
+                    wrap_var  = f"__wrap_{_safe_c_name(c_func_name)}_{self.thunk_counter - 1}"
+                    self._emit(f"{fn_c_type} {wrap_var} = {{{thunk_name}, NULL}};")
+                    args_list.append(wrap_var)
                 else:
                     args_list.append(self._generate_expr(arg))
             return f"{expr.name}({', '.join(args_list)})"
@@ -599,10 +679,8 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         # 動的配列 (MrylVec_<T>) のメソッド
         if obj_type.startswith("vec_"):
             et       = obj_type[4:]
-            obj_name = (
-                expr.obj.name if expr.obj.__class__.__name__ == 'VarRef'
-                else self._generate_expr(expr.obj)
-            )
+            # SM モードでは VarRef に __sm-> プレフィックスが必要なため常に _generate_expr を使用する
+            obj_name = self._generate_expr(expr.obj)
             if expr.method == 'push':
                 arg = self._generate_expr(expr.args[0])
                 return f"mryl_vec_{et}_push(&{obj_name}, {arg})"
@@ -698,11 +776,95 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                 return f"mryl_str_split({obj_code}, {arg})"
 
 
+        # Subject<T> / Observable<T> のメソッド
+        # env には Mryl 型名 "Subject_T" / "Observable_T" で登録されるため両方判定する
+        if (obj_type.startswith("MrylSubject_") or
+                obj_type.startswith("Subject_") or
+                obj_type.startswith("Observable_")):
+            if obj_type.startswith("MrylSubject_"):
+                T = obj_type[len("MrylSubject_"):].rstrip("*").strip()
+            elif obj_type.startswith("Subject_"):
+                T = obj_type[len("Subject_"):]
+            else:
+                T = obj_type[len("Observable_"):]
+            obj_code = self._generate_expr(expr.obj)
+            return self._generate_subject_method(expr, T, obj_code)
+
+        # Subscription の unsubscribe（void* または Mryl 型名 "Subscription" の両方に対応）
+        if obj_type in ("void*", "Subscription"):
+            obj_code = self._generate_expr(expr.obj)
+            if expr.method == "unsubscribe":
+                # MrylSubscriptionBase* にキャスト → active = 0（型非依存の汎用版）
+                return f"mryl_subscription_unsubscribe({obj_code})"
+
         obj         = self._generate_expr(expr.obj)
         args_list   = [self._generate_expr(arg) for arg in expr.args]
         struct_name = obj_type   # Bug#27: obj の型から struct 名を解決
         all_args    = [f"&{obj}"] + args_list   # Bug#28: ポインタ渡し
         return f"{struct_name}_{expr.method}({', '.join(all_args)})"
+
+    def _generate_subject_method(self, expr, T: str, obj_code: str) -> str:
+        """Subject<T> / Observable<T> のメソッド呼び出しを C 式文字列として生成する。
+        オペレータ（filter/map/take/skip/merge）は新しい Subject を生成して
+        上流に subscribe 登録するパイプライン方式（C# Rx.NET 準拠）。
+        """
+        method = expr.method
+
+        if method == "emit":
+            val = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_emit({obj_code}, {val})"
+
+        if method == "complete":
+            return f"mryl_subject_{T}_complete({obj_code})"
+
+        if method == "error":
+            msg = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_error({obj_code}, {msg})"
+
+        if method == "subscribe":
+            # subscribe(on_next) or subscribe(on_next, on_error, on_complete)
+            # ラムダ関数は uniform convention で void* __e を最終引数に持つため
+            # MrylOnNext_T / MrylOnError_T / MrylOnComplete_T へキャストして直接渡す。
+            on_next     = self._generate_expr(expr.args[0]) if len(expr.args) >= 1 else "NULL"
+            on_error    = self._generate_expr(expr.args[1]) if len(expr.args) >= 2 else "NULL"
+            on_complete = self._generate_expr(expr.args[2]) if len(expr.args) >= 3 else "NULL"
+            ct = self._type_to_c_base(T)
+            on_next_cast     = f"(MrylOnNext_{T}){on_next}"     if on_next     != "NULL" else "NULL"
+            on_error_cast    = f"(MrylOnError_{T}){on_error}"   if on_error    != "NULL" else "NULL"
+            on_complete_cast = f"(MrylOnComplete_{T}){on_complete}" if on_complete != "NULL" else "NULL"
+            return (
+                f"mryl_subject_{T}_subscribe({obj_code}, "
+                f"{on_next_cast}, {on_error_cast}, {on_complete_cast}, NULL)"
+            )
+
+        if method == "unsubscribe":
+            return f"mryl_subscription_{T}_unsubscribe((MrylSubscription_{T}*){obj_code})"
+
+        # オペレータ（filter/map/take/skip/merge）: ヘッダ生成の mryl_subject_T_op() を呼ぶ
+        ct = self._type_to_c_base(T)
+        if method == "filter":
+            pred = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_filter({obj_code}, (int (*)({ct}, void*)){pred}, NULL)"
+
+        if method == "map":
+            mapper = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_map({obj_code}, ({ct} (*)({ct}, void*)){mapper}, NULL)"
+
+        if method == "take":
+            n = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_take({obj_code}, {n})"
+
+        if method == "skip":
+            n = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_skip({obj_code}, {n})"
+
+        if method == "merge":
+            other = self._generate_expr(expr.args[0])
+            return f"mryl_subject_{T}_merge({obj_code}, {other})"
+
+        # フォールバック（未対応メソッド）
+        args = ", ".join(self._generate_expr(a) for a in expr.args)
+        return f"/* Observable.{method}({args}) - not implemented */"
 
     def _generate_iter_method(
         self, expr, et: str, obj_c: str, src_is_temp: bool = False
@@ -741,7 +903,13 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
 
         # src_cap / src_free もそれぞれ1文として改行を付ける
         src_cap  = f"MrylVec_{et} {src_var} = {obj_c};{NL}" if src_is_temp else ""
-        src_free = f"free({src_var}.data);{NL}" if src_is_temp else ""
+        # string 要素の場合は各要素の char* も解放する専用関数を使う。
+        # 通常の free(v.data) だと MrylString 構造体の配列のみ解放され char* がリークする。
+        if src_is_temp:
+            src_free = (f"mryl_vec_string_free({src_var});{NL}" if et == "string"
+                        else f"free({src_var}.data);{NL}")
+        else:
+            src_free = ""
 
         # statement expression の開閉テンプレート
         OPEN  = f"({{{NL}"
@@ -831,17 +999,21 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         if method == 'filter':
             lam_setup, lam_fn, lam_env = _lam_full(0)
             r = f"__iter_{idx}"
+            # string 要素の場合は push 時に deep copy する。
+            # src_free で元 vec の char* が解放された後も結果 vec の要素が有効であるために必要。
+            push_val = (f"make_mryl_string({src_ref}.data[{i_var}].data)"
+                        if et == "string" else f"{src_ref}.data[{i_var}]")
             return (
                 f"{OPEN}"
-                f"{src_cap}"
-                f"{lam_setup}"
-                f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
-                f"for (int32_t {i_var} = 0; {i_var} < {src_ref}.len; {i_var}++) {{"
-                f" if ({lam_fn}({src_ref}.data[{i_var}], {lam_env})) {{"
-                f" mryl_vec_{et}_push(&{r}, {src_ref}.data[{i_var}]); }} }}{NL}"
-                f"{src_free}"
-                f"{r};"
-                f"{CLOSE}"
+                + f"{src_cap}"
+                + f"{lam_setup}"
+                + f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
+                + f"for (int32_t {i_var} = 0; {i_var} < {src_ref}.len; {i_var}++) {{"
+                + f" if ({lam_fn}({src_ref}.data[{i_var}], {lam_env})) {{"
+                + f" mryl_vec_{et}_push(&{r}, {push_val}); }} }}{NL}"
+                + f"{src_free}"
+                + f"{r};"
+                + f"{CLOSE}"
             )
 
         # ── take ─────────────────────────────────────────────────
@@ -868,27 +1040,34 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             s = f"__s_{idx}"
             r = f"__iter_{idx}"
             if src_is_temp:
+                # string 要素の場合は push 時に deep copy する（filter と同じ理由）。
+                push_val = (f"make_mryl_string({src_ref}.data[{i_var}].data)"
+                            if et == "string" else f"{src_ref}.data[{i_var}]")
                 return (
                     f"{OPEN}"
-                    f"{src_cap}"
-                    f"int32_t {s} = ({n} < {src_ref}.len ? {n} : {src_ref}.len);{NL}"
-                    f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
-                    f"for (int32_t {i_var} = {s}; {i_var} < {src_ref}.len; {i_var}++) {{"
-                    f" mryl_vec_{et}_push(&{r}, {src_ref}.data[{i_var}]); }}{NL}"
-                    f"{src_free}"
-                    f"{r};"
-                    f"{CLOSE}"
+                    + f"{src_cap}"
+                    + f"int32_t {s} = ({n} < {src_ref}.len ? {n} : {src_ref}.len);{NL}"
+                    + f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
+                    + f"for (int32_t {i_var} = {s}; {i_var} < {src_ref}.len; {i_var}++) {{"
+                    + f" mryl_vec_{et}_push(&{r}, {push_val}); }}{NL}"
+                    + f"{src_free}"
+                    + f"{r};"
+                    + f"{CLOSE}"
                 )
             else:
+                # ユーザー変数に対しても view（ポインタ算術）ではなくコピー方式を使う。
+                # view の .data はオリジナルの途中ポインタのため、後続の first() 等が
+                # src_is_temp=True と判断して free すると UB になるため。
+                push_val = (f"make_mryl_string({obj_c}.data[{i_var}].data)"
+                            if et == "string" else f"{obj_c}.data[{i_var}]")
                 return (
                     f"{OPEN}"
-                    f"int32_t {s} = ({n} < {obj_c}.len ? {n} : {obj_c}.len);{NL}"
-                    f"MrylVec_{et} {r};{NL}"
-                    f"{r}.data = {obj_c}.data + {s};{NL}"
-                    f"{r}.len  = {obj_c}.len - {s};{NL}"
-                    f"{r}.cap  = {obj_c}.cap - {s};{NL}"
-                    f"{r};"
-                    f"{CLOSE}"
+                    + f"int32_t {s} = ({n} < {obj_c}.len ? {n} : {obj_c}.len);{NL}"
+                    + f"MrylVec_{et} {r} = mryl_vec_{et}_new();{NL}"
+                    + f"for (int32_t {i_var} = {s}; {i_var} < {obj_c}.len; {i_var}++) {{"
+                    + f" mryl_vec_{et}_push(&{r}, {push_val}); }}{NL}"
+                    + f"{r};"
+                    + f"{CLOSE}"
                 )
 
         # ── to_array ─────────────────────────────────────────────
@@ -965,16 +1144,23 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             struct = f"MrylResult_{ct}_MrylString"
             self.result_type_registry.add((ct, "MrylString", struct))
             r = f"__first_{idx}"
+            # string 要素の場合は src_free で char* が解放される前に deep copy する。
+            # shallow copy のまま src_free すると ok_val.data がダングリングになる。
+            ok_line = (
+                f"else {{ {r}.is_ok = 1; {r}.data.ok_val = make_mryl_string({src_ref}.data[0].data); }}{NL}"
+                if et == "string" else
+                f"else {{ {r}.is_ok = 1; {r}.data.ok_val = {src_ref}.data[0]; }}{NL}"
+            )
             return (
                 f"{OPEN}"
-                f"{src_cap}"
-                f"{struct} {r};{NL}"
-                f"if ({src_ref}.len == 0) {{"
-                f" {r}.is_ok = 0; {r}.data.err_val = make_mryl_string(\"empty sequence\"); }}{NL}"
-                f"else {{ {r}.is_ok = 1; {r}.data.ok_val = {src_ref}.data[0]; }}{NL}"
-                f"{src_free}"
-                f"{r};"
-                f"{CLOSE}"
+                + f"{src_cap}"
+                + f"{struct} {r};{NL}"
+                + f"if ({src_ref}.len == 0) {{"
+                + f" {r}.is_ok = 0; {r}.data.err_val = make_mryl_string(\"empty sequence\"); }}{NL}"
+                + ok_line
+                + f"{src_free}"
+                + f"{r};"
+                + f"{CLOSE}"
             )
 
         # ── aggregate ────────────────────────────────────────────

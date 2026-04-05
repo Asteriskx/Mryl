@@ -1,5 +1,6 @@
 from Ast import *
 from MrylError import *
+from TypeChecker._proto import _TypeCheckerBase
 from TypeChecker._util import (
     INTEGER_TYPES, FLOAT_TYPES,
     is_integer_type as _is_integer_type,
@@ -8,7 +9,7 @@ from TypeChecker._util import (
 )
 
 
-class TypeCheckerExprMixin:
+class TypeCheckerExprMixin(_TypeCheckerBase):
     """式（Expression）レベルの型チェックを担当する Mixin。
 
     check_expr / lookup_var / _pattern_bindings_scope /
@@ -81,10 +82,55 @@ class TypeCheckerExprMixin:
         if isinstance(expr, AwaitExpr):
             return self.check_await(expr)
 
+        if isinstance(expr, WeakExpr):
+            return self.check_weak(expr)
+
         if isinstance(expr, Lambda):
             return self.check_lambda(expr)
 
         if isinstance(expr, EnumVariantExpr):
+            # Task::when_all / Task::when_any — ユーザー定義 struct Task がない場合のみ
+            if expr.enum_name == "Task" and expr.variant_name in ("when_all", "when_any") \
+                    and not self.structs.get("Task"):
+                if not expr.args or not expr.has_parens:
+                    raise TypeError_(f"Task::{expr.variant_name} requires an array argument", expr)
+                arr = expr.args[0]
+                if not isinstance(arr, ArrayLiteral) or not arr.elements:
+                    raise TypeError_(f"Task::{expr.variant_name} argument must be a non-empty array literal", expr)
+                # 各要素が Future<T> であることを確認、T を取得
+                elem_type = self.check_expr(arr.elements[0])
+                if elem_type.name != "Future" or not elem_type.type_args:
+                    raise TypeError_(f"Task::{expr.variant_name}: elements must be async task (Future<T>), got {elem_type}", arr.elements[0])
+                T = elem_type.type_args[0]
+                if T.name == "void":
+                    raise TypeError_(f"Task::{expr.variant_name}: void Task is not supported", expr)
+                if T.name == "Result":
+                    raise TypeError_(f"Task::{expr.variant_name}: Result<T,E> Task is not supported in v0.6.0 (see issue)", expr)
+                # 全要素の型が一致することを確認
+                for elem in arr.elements[1:]:
+                    et = self.check_expr(elem)
+                    if not self.types_equal(et, elem_type):
+                        raise TypeError_(f"Task::{expr.variant_name}: all tasks must have the same type, got {et} and {elem_type}", elem)
+                # CodeGenerator で型別ランタイム関数を選択できるよう T 名を AST ノードに付与
+                expr._combinator_elem_type = T.name
+                if expr.variant_name == "when_all":
+                    # Future<T[]>
+                    return TypeNode("Future", type_args=[TypeNode(T.name, array_size=-1)])
+                else:
+                    # Future<T>
+                    return TypeNode("Future", type_args=[T])
+
+            # Subject<T>::new() — Subject<T> を返す（ユーザー定義 struct Subject がない場合のみ）
+            if expr.enum_name == "Subject" and expr.variant_name == "new" \
+                    and not self.structs.get("Subject"):
+                # 型引数 T を取得（Subject<i32>::new() の i32 部分）
+                if not expr.type_args:
+                    raise TypeError_("Subject::new() requires a type argument, e.g. Subject<i32>::new()", expr)
+                T = expr.type_args[0] if isinstance(expr.type_args[0], TypeNode) else TypeNode(expr.type_args[0])
+                # AST ノードに型引数を付与（CodeGenerator で使用）
+                expr._subject_elem_type = T.name
+                return TypeNode("Subject", type_args=[T])
+
             # Box::new(v) — Box<T> を返す（ユーザー定義 struct Box がない場合のみ）
             if expr.enum_name == "Box" and expr.variant_name == "new" and expr.args \
                     and not self.structs.get("Box"):
@@ -222,9 +268,22 @@ class TypeCheckerExprMixin:
     def check_await(self, expr: AwaitExpr):
         """await 式の型チェック。Future<T> を T にアンラップ。"""
         handle_type = self.check_expr(expr.expr)
+        # WeakTask<T> を await しようとしたらエラー（設計規約: cancel 後は await しない）
+        if handle_type.name == "WeakTask":
+            raise TypeError_("cannot await WeakTask<T>; use Future<T> handle for await", expr)
         if handle_type.name == "Future" and handle_type.type_args:
             return handle_type.type_args[0]
         return TypeNode("void")
+
+    # ============================================
+    # WeakExpr
+    # ============================================
+    def check_weak(self, expr: WeakExpr):
+        """weak(handle) の型チェック。Future<T> → WeakTask<T>。"""
+        inner = self.check_expr(expr.expr)
+        if inner.name != "Future" or not inner.type_args:
+            raise TypeError_(f"weak() requires Future<T>, got {inner}", expr)
+        return TypeNode("WeakTask", type_args=[inner.type_args[0]])
 
     # ============================================
     # 型分類ヘルパー

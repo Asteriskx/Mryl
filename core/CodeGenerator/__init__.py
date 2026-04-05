@@ -21,7 +21,7 @@
   _lambda.py  - CodeGeneratorLambdaMixin (_body_has_await / _collect_captures /
                 _generate_lambda / _generate_lambda_inline / _generate_async_lambda)
   _async.py   - CodeGeneratorAsyncMixin (_sm_let_c_type / _split_by_await /
-                _generate_async_state_machine / _emit_await_setup / _emit_await_resume /
+                _generate_async_state_machine / _emit_await_setup /
                 _generate_sm_stmt / _emit_task_complete / _emit_task_factory /
                 _emit_main_sm_entry / _emit_task_runtime)
   _generic.py - CodeGeneratorGenericMixin (_register_generic_instantiation /
@@ -101,6 +101,9 @@ class CodeGenerator(
         self.local_box_vars              = []    # [(c_var_name, type_node)] Box 変数（宣言順）
         self.box_inner_moved             = set() # 内部ポインタが別変数に移動済みの c_var_name 集合
         self.local_box_vec_vars          = []    # [(c_var_name, inner_type_node)] Vec<Box<T>> 変数
+        self.local_toarray_vec_vars      = []    # [c_var_name] to_array() 結果の Vec 変数（.data を free）
+        self.local_struct_box_vars       = []    # [(c_var_name, struct_name)] Box フィールド持ち struct 変数（#68）
+        self.local_option_box_vars       = []    # [c_var_name] Option<Box<T>> 変数（#67）
 
     # ------------------------------------------------------------------
     # メインエントリポイント
@@ -135,6 +138,9 @@ class CodeGenerator(
         self.local_box_vars              = []    # [(c_var_name, type_node)]
         self.box_inner_moved             = set() # 内部ポインタ移動済みの c_var_name 集合
         self.local_box_vec_vars          = []    # [(c_var_name, inner_type_node)]
+        self.local_toarray_vec_vars      = []    # [c_var_name] to_array() 結果の Vec 変数
+        self.local_struct_box_vars       = []    # [(c_var_name, struct_name)] Box フィールド持ち struct（#68）
+        self.local_option_box_vars       = []    # [c_var_name] Option<Box<T>>（#67）
 
         # 全関数をキャッシュ
         self.program_functions = {func.name: func for func in program.functions}
@@ -159,10 +165,6 @@ class CodeGenerator(
         self._emit_builtin_types()
         # Result<T,E> typedef プレースホルダー
         self._emit("// __RESULT_TYPEDEFS_PLACEHOLDER__")
-        # Option<T> typedef プレースホルダー
-        self._emit("// __OPTION_TYPEDEFS_PLACEHOLDER__")
-        # fn 型 fat pointer typedef プレースホルダー
-        self._emit("// __FN_TYPEDEFS_PLACEHOLDER__")
 
         # enum の C 定義を出力
         self.enums = {e.name: e for e in program.enums}
@@ -186,6 +188,11 @@ class CodeGenerator(
             self._emit(f"}} {mono};")
             self._emit("")
 
+        # Option<T> / fn 型 fat pointer typedef プレースホルダー
+        # ※ MrylOption_* / MrylFn_* はユーザー定義 struct 型を参照するため、struct 定義ブロックの後に配置する (#76)
+        self._emit("// __OPTION_TYPEDEFS_PLACEHOLDER__")
+        self._emit("// __FN_TYPEDEFS_PLACEHOLDER__")
+
         # Built-in 関数の出力
         self._emit_builtin_functions()
 
@@ -193,6 +200,14 @@ class CodeGenerator(
         used_vec_types = self._collect_vec_elem_types(program)
         if used_vec_types:
             self._emit_vec_helpers(used_vec_types)
+
+        # Task コンビネータヘルパー（MrylVec ヘルパーの後に出力する必要あり）
+        combinator_types = self._collect_combinator_types(program)
+        self._emit_combinator_helpers(combinator_types)
+
+        # Observable / Subject ヘルパー
+        subject_types = self._collect_subject_types(program)
+        self._emit_subject_helpers(subject_types)
 
         # 構造体メソッドの出力
         for struct in program.structs:
@@ -262,15 +277,16 @@ class CodeGenerator(
                         lambda_lines.append(f"    {cap_c_type} {cap_name};")
                     lambda_lines.append(f"}} {env_struct};")
                     # fat pointer 規約: void* __e を最終引数、body 先頭でキャスト
+                    # params_str が "void" の場合は "void, void* __e" にならないよう注意
                     full_params = (
-                        f"{params_str}, void* __e" if params_str else "void* __e"
+                        f"{params_str}, void* __e" if (params_str and params_str != "void") else "void* __e"
                     )
                     lambda_lines.append(f"static {ret_type} {lam_name}({full_params}) {{")
                     lambda_lines.append(f"    {env_struct}* __env = ({env_struct}*)__e;")
                 else:
                     # キャプチャなし: uniform convention のため void* __e を付与
                     full_params = (
-                        f"{params_str}, void* __e" if params_str else "void* __e"
+                        f"{params_str}, void* __e" if (params_str and params_str != "void") else "void* __e"
                     )
                     lambda_lines.append(f"static {ret_type} {lam_name}({full_params}) {{")
                 lambda_lines.extend(body_lines)
@@ -414,15 +430,16 @@ class CodeGenerator(
                     lambda_lines.append(f"    {cap_c_type} {cap_name};")
                 lambda_lines.append(f"}} {env_struct};")
                 # fat pointer 規約: void* __e を最終引数、body 先頭でキャスト
+                # params_str が "void" の場合は "void, void* __e" にならないよう注意
                 full_params = (
-                    f"{params_str}, void* __e" if params_str else "void* __e"
+                    f"{params_str}, void* __e" if (params_str and params_str != "void") else "void* __e"
                 )
                 lambda_lines.append(f"static {ret_type} {lam_name}({full_params}) {{")
                 lambda_lines.append(f"    {env_struct}* __env = ({env_struct}*)__e;")
             else:
                 # キャプチャなし: uniform convention のため void* __e を付与
                 full_params = (
-                    f"{params_str}, void* __e" if params_str else "void* __e"
+                    f"{params_str}, void* __e" if (params_str and params_str != "void") else "void* __e"
                 )
                 lambda_lines.append(f"static {ret_type} {lam_name}({full_params}) {{")
             lambda_lines.extend(body_lines)
@@ -463,9 +480,12 @@ class CodeGenerator(
         self.local_string_vars   = []
         self.local_closure_envs  = []
         self.closure_var_env_ptrs = {}
-        self.local_box_vars      = []    # Box 変数追跡（関数スコープ）
-        self.box_inner_moved     = set() # 内部ポインタ移動済み集合（関数スコープ）
-        self.local_box_vec_vars  = []    # Vec<Box<T>> 変数追跡（関数スコープ）
+        self.local_box_vars         = []    # Box 変数追跡（関数スコープ）
+        self.box_inner_moved        = set() # 内部ポインタ移動済み集合（関数スコープ）
+        self.local_box_vec_vars     = []    # Vec<Box<T>> 変数追跡（関数スコープ）
+        self.local_toarray_vec_vars = []    # to_array() 結果 Vec 変数追跡（関数スコープ）
+        self.local_struct_box_vars  = []    # Box フィールド持ち struct 変数追跡（#68）
+        self.local_option_box_vars  = []    # Option<Box<T>> 変数追跡（#67）
         self.temp_string_counter = 0
         saved_renames            = self.ident_renames.copy()
         self.ident_renames       = {}
@@ -535,6 +555,15 @@ class CodeGenerator(
             # Vec<Box<T>> 変数: 要素を先に free してから .data を free
             for (vn, _inner_tn) in reversed(self.local_box_vec_vars):
                 self._emit_box_vec_free(vn)
+            # to_array() 結果 Vec 変数: .data を free（#71）
+            for vn in reversed(self.local_toarray_vec_vars):
+                self._emit(f"free({vn}.data);")
+            # Box フィールド持ち struct 変数: デストラクタを呼ぶ（#68）
+            for (vn, sname) in reversed(self.local_struct_box_vars):
+                self._emit(f"mryl_free_{sname}({vn});")
+            # Option<Box<T>> 変数: has_value なら Box を free（#67）
+            for vn in reversed(self.local_option_box_vars):
+                self._emit(f"if ({vn}.has_value) {{ free({vn}.value); }}")
 
         if not has_return:
             if func.name == "main":
@@ -604,16 +633,22 @@ class CodeGenerator(
 
         # _generate_return 内の cleanup が参照するためメソッド開始時に初期化する
         # Box 系も同様にリセットしないと前のメソッドの状態が漏れる（CRITICAL）
-        saved_str_vars           = getattr(self, 'local_string_vars', [])
-        saved_temp_ctr           = getattr(self, 'temp_string_counter', 0)
-        saved_box_vars           = self.local_box_vars
-        saved_box_inner          = self.box_inner_moved
-        saved_box_vec_vars       = self.local_box_vec_vars
-        self.local_string_vars   = []
-        self.temp_string_counter = 0
-        self.local_box_vars      = []
-        self.box_inner_moved     = set()
-        self.local_box_vec_vars  = []
+        saved_str_vars              = getattr(self, 'local_string_vars', [])
+        saved_temp_ctr              = getattr(self, 'temp_string_counter', 0)
+        saved_box_vars              = self.local_box_vars
+        saved_box_inner             = self.box_inner_moved
+        saved_box_vec_vars          = self.local_box_vec_vars
+        saved_toarray_vec_vars      = self.local_toarray_vec_vars
+        saved_struct_box_vars       = self.local_struct_box_vars
+        saved_option_box_vars       = self.local_option_box_vars
+        self.local_string_vars      = []
+        self.temp_string_counter    = 0
+        self.local_box_vars         = []
+        self.box_inner_moved        = set()
+        self.local_box_vec_vars     = []
+        self.local_toarray_vec_vars = []
+        self.local_struct_box_vars  = []
+        self.local_option_box_vars  = []
 
         # env に self と引数を登録（_infer_expr_type が struct フィールド型を解決できるようにする）
         method_env: dict = {}
@@ -644,13 +679,25 @@ class CodeGenerator(
                 self._emit_box_free(vn, tn)
             for (vn, _tn) in reversed(self.local_box_vec_vars):
                 self._emit_box_vec_free(vn)
+            # to_array() 結果 Vec 変数: .data を free（#71）
+            for vn in reversed(self.local_toarray_vec_vars):
+                self._emit(f"free({vn}.data);")
+            # Box フィールド持ち struct 変数: デストラクタを呼ぶ（#68）
+            for (vn, sname) in reversed(self.local_struct_box_vars):
+                self._emit(f"mryl_free_{sname}({vn});")
+            # Option<Box<T>> 変数: has_value なら Box を free（#67）
+            for vn in reversed(self.local_option_box_vars):
+                self._emit(f"if ({vn}.has_value) {{ free({vn}.value); }}")
 
         # 復元
-        self.local_string_vars   = saved_str_vars
-        self.temp_string_counter = saved_temp_ctr
-        self.local_box_vars      = saved_box_vars
-        self.box_inner_moved     = saved_box_inner
-        self.local_box_vec_vars  = saved_box_vec_vars
+        self.local_string_vars      = saved_str_vars
+        self.temp_string_counter    = saved_temp_ctr
+        self.local_box_vars         = saved_box_vars
+        self.box_inner_moved        = saved_box_inner
+        self.local_box_vec_vars     = saved_box_vec_vars
+        self.local_toarray_vec_vars = saved_toarray_vec_vars
+        self.local_struct_box_vars  = saved_struct_box_vars
+        self.local_option_box_vars  = saved_option_box_vars
 
         self.indent_level -= 1
         self._emit("}")

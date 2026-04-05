@@ -28,6 +28,23 @@ class CodeGeneratorTypeMixin(_CodeGeneratorBase):
         if type_node.name == "Future":
             return "MrylTask*"
 
+        # WeakTask<T> は C 表現上 Future<T> と同一（MrylTask* のまま）
+        if type_node.name == "WeakTask":
+            return "MrylTask*"
+
+        # Subject<T> / Observable<T> → MrylSubject_T*
+        if type_node.name in ("Subject", "Observable"):
+            if type_node.type_args:
+                arg = type_node.type_args[0]
+                T = arg.name if hasattr(arg, 'name') else str(arg)
+            else:
+                T = "i32"
+            return f"MrylSubject_{T}*"
+
+        # Subscription → MrylSubscription_T*（型引数なし、void* で汎用的に扱う）
+        if type_node.name == "Subscription":
+            return "void*"
+
         if type_node.name == "Box":
             # ユーザー定義 struct Box がある場合は通常の base_type として処理する
             if not self.has_user_box:
