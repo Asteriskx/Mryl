@@ -363,45 +363,42 @@ class CodeGenerator(
         else:
             self.code = [l for l in self.code if "// __OPTION_TYPEDEFS_PLACEHOLDER__" not in l]
 
-        # mryl_str_split C 関数を Vec ヘルパーの後ろに插入
-        if self.uses_str_split:
-            split_lines = [
-                "static inline MrylVec_string mryl_str_split(MrylString s, MrylString delim) {",
-                "    MrylVec_string result = mryl_vec_string_new();",
-                "    if (delim.length == 0) {",
-                "        for (int i = 0; i < s.length; i++) {",
-                "            char buf[2] = {s.data[i], '\\0'};",
-                "            mryl_vec_string_push(&result, make_mryl_string(buf));",
-                "        }",
-                "        return result;",
-                "    }",
-                "    const char* p = s.data;",
-                "    const char* found;",
-                "    while ((found = strstr(p, delim.data)) != NULL) {",
-                "        int32_t seg = (int32_t)(found - p);",
-                "        char* buf = (char*)malloc(seg + 1);",
-                "        memcpy(buf, p, seg); buf[seg] = '\\0';",
-                "        MrylString part; part.data = buf; part.length = seg;",
-                "        mryl_vec_string_push(&result, part);",
-                "        p = found + delim.length;",
-                "    }",
-                "    mryl_vec_string_push(&result, make_mryl_string(p));",
-                "    return result;",
-                "}",
-                "",
-            ]
-            # Vec ヘルパーの直後に挿入
-            insert_at = len(self.code)
-            for i, line in enumerate(self.code):
-                if line.startswith("// Dynamic array (MrylVec_"):
-                    # Vec ヘルパーブロックの終端を探す
-                    j = i
-                    while j < len(self.code) and not (self.code[j] == "" and j + 1 < len(self.code) and not self.code[j+1].startswith("// Dynamic array") and not self.code[j+1].startswith("typedef struct { MrylString") and not self.code[j+1].startswith("static inline MrylVec")):
-                        j += 1
-                    insert_at = j + 1
-                    break
-            for k, ln in enumerate(split_lines):
-                self.code.insert(insert_at + k, ln)
+        # mryl_str_split C 関数を全 MrylVec_* 定義の後ろに挿入する（#78）
+        # _header.py の _emit_vec_helpers 末尾に __SPLIT_FN_PLACEHOLDER__ を置いており、
+        # split() が使われる場合はそこを関数定義で置換し、使われない場合は削除する。
+        # （旧来の "最初の Vec ブロック直後" 挿入方式では MrylVec_string が
+        #   まだ定義されていない位置に挿入されコンパイルエラーになっていた）
+        split_fn_lines = [
+            "static inline MrylVec_string mryl_str_split(MrylString s, MrylString delim) {",
+            "    MrylVec_string result = mryl_vec_string_new();",
+            "    if (delim.length == 0) {",
+            "        for (int i = 0; i < s.length; i++) {",
+            "            char buf[2] = {s.data[i], '\\0'};",
+            "            mryl_vec_string_push(&result, make_mryl_string(buf));",
+            "        }",
+            "        return result;",
+            "    }",
+            "    const char* p = s.data;",
+            "    const char* found;",
+            "    while ((found = strstr(p, delim.data)) != NULL) {",
+            "        int32_t seg = (int32_t)(found - p);",
+            "        char* buf = (char*)malloc(seg + 1);",
+            "        memcpy(buf, p, seg); buf[seg] = '\\0';",
+            "        MrylString part; part.data = buf; part.length = seg;",
+            "        mryl_vec_string_push(&result, part);",
+            "        p = found + delim.length;",
+            "    }",
+            "    mryl_vec_string_push(&result, make_mryl_string(p));",
+            "    return result;",
+            "}",
+        ]
+        for i, line in enumerate(self.code):
+            if line == "// __SPLIT_FN_PLACEHOLDER__":
+                if self.uses_str_split:
+                    self.code[i:i + 1] = split_fn_lines
+                else:
+                    del self.code[i]
+                break
 
         return '\n'.join(self.code)
 

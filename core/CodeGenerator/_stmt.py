@@ -353,10 +353,17 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                 elems_str = ", ".join(elements)
                 n         = len(stmt.init_expr.elements)
                 self._emit(f"MrylVec_{et} {stmt.name} = mryl_vec_{et}_from(({ct}[]){{{elems_str}}}, {n});")
+                # mryl_vec_from() は malloc するため、Box<T>[] 以外はスコープ終了時に .data を free する（#78）
+                # Box<T>[] は local_box_vec_vars で管理済みなので除外する
+                if not et.startswith("Box_"):
+                    self.local_toarray_vec_vars.append(_safe_c_name(stmt.name))
             elif stmt.init_expr is not None and init_expr_class != "ArrayLiteral":
                 # split() など Vec を返す式で初期化（例: mryl_str_split(...)）
+                # これらも新規 malloc が発生するため .data free が必要（#78）
                 rhs = self._generate_expr(stmt.init_expr)
                 self._emit(f"MrylVec_{et} {stmt.name} = {rhs};")
+                if not et.startswith("Box_"):
+                    self.local_toarray_vec_vars.append(_safe_c_name(stmt.name))
             else:
                 self._emit(f"MrylVec_{et} {stmt.name} = mryl_vec_{et}_new();")
             self.vec_var_types[stmt.name] = et

@@ -187,6 +187,8 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
                 self._emit(f"    free(v.data);")
                 self._emit(f"}}")
             self._emit(f"")
+        # mryl_str_split はここ（全 MrylVec_* 定義の後）に挿入される（#78）
+        self._emit("// __SPLIT_FN_PLACEHOLDER__")
 
     def _emit_builtin_functions(self):
         """組み込み関数 (mryl_panic / print / println / MrylString helpers) を出力する """
