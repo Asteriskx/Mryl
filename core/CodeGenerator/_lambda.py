@@ -163,7 +163,12 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
                     # 動的配列を返す式ラムダ (例: (xs: i32[]) => xs)
                     ret_type = f"MrylVec_{inferred.name}"
                 else:
-                    ret_type = "int32_t"
+                    # inferred_return_type が未設定の場合は body_t から C 型を決定する（#81）
+                    # 例: (a: string, b: string) => a + b → body_t="string" → "MrylString"
+                    if body_t and body_t not in ("any", "void", "unknown"):
+                        ret_type = self._type_to_c_base(body_t)
+                    else:
+                        ret_type = "int32_t"
 
         self.env.pop()
 
@@ -213,7 +218,12 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
             inferred = getattr(expr, 'inferred_return_type', None)
             ret_type = self._type_to_c(inferred) if inferred and inferred.name != 'void' else "void"
         else:
-            ret_type = "int32_t"
+            # body_t から C 型を決定する（inferred_return_type が設定されていない場合の fallback）（#81）
+            body_t = self._infer_expr_type(expr.body)
+            if body_t and body_t not in ("any", "void", "unknown"):
+                ret_type = self._type_to_c_base(body_t)
+            else:
+                ret_type = "int32_t"
 
         saved_code             = self.code
         saved_indent           = self.indent_level

@@ -1170,8 +1170,22 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                 lam_setup, lam_fn, lam_env = _lam_full(0)
                 struct = f"MrylResult_{ct}_MrylString"
                 self.result_type_registry.add((ct, "MrylString", struct))
-                r   = f"__agg_{idx}"
-                acc = f"__acc_{idx}"
+                r    = f"__agg_{idx}"
+                acc  = f"__acc_{idx}"
+                nacc = f"__nacc_{idx}"
+                if et == "string":
+                    # string 要素の aggregate:
+                    #   - 初期値は deep copy（shallow copy だと src_free 後にダングリング）（#81）
+                    #   - ループ内でラムダが新規 MrylString を返すため、
+                    #     置き換え前に古い acc.data を free する必要がある（#81）
+                    acc_init  = f"make_mryl_string({src_ref}.data[0].data)"
+                    loop_body = (
+                        f" MrylString {nacc} = {lam_fn}({acc}, {src_ref}.data[{i_var}], {lam_env});"
+                        f" free_mryl_string({acc}); {acc} = {nacc}; }}{NL}"
+                    )
+                else:
+                    acc_init  = f"{src_ref}.data[0]"
+                    loop_body = f" {acc} = {lam_fn}({acc}, {src_ref}.data[{i_var}], {lam_env}); }}{NL}"
                 return (
                     f"{OPEN}"
                     f"{src_cap}"
@@ -1180,9 +1194,9 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                     f"if ({src_ref}.len == 0) {{"
                     f" {r}.is_ok = 0; {r}.data.err_val = make_mryl_string(\"empty sequence\"); }}{NL}"
                     f"else {{{NL}"
-                    f"    {ct} {acc} = {src_ref}.data[0];{NL}"
-                    f"    for (int32_t {i_var} = 1; {i_var} < {src_ref}.len; {i_var}++) {{"
-                    f" {acc} = {lam_fn}({acc}, {src_ref}.data[{i_var}], {lam_env}); }}{NL}"
+                    f"    {ct} {acc} = {acc_init};{NL}"
+                    f"    for (int32_t {i_var} = 1; {i_var} < {src_ref}.len; {i_var}++){{"
+                    + loop_body +
                     f"    {r}.is_ok = 1; {r}.data.ok_val = {acc};{NL}}}{NL}"
                     f"{src_free}"
                     f"{r};"
@@ -1195,13 +1209,23 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                 init_t  = self._infer_expr_type(expr.args[0])
                 init_ct = self._type_to_c_base(init_t) if init_t not in ("i32", "any") else ct
                 acc     = f"__acc_{idx}"
+                nacc    = f"__nacc_{idx}"
+                if init_t == "string":
+                    # 初期値が string の場合: ループ内の acc 置き換えで古い MrylString を free（#81）
+                    # 初期値が変数参照 (shallow copy) の場合のリークは既知の制限とする。
+                    loop_body = (
+                        f" MrylString {nacc} = {lam_fn}({acc}, {src_ref}.data[{i_var}], {lam_env});"
+                        f" free_mryl_string({acc}); {acc} = {nacc}; }}{NL}"
+                    )
+                else:
+                    loop_body = f" {acc} = {lam_fn}({acc}, {src_ref}.data[{i_var}], {lam_env}); }}{NL}"
                 return (
                     f"{OPEN}"
                     f"{src_cap}"
                     f"{lam_setup}"
                     f"{init_ct} {acc} = {init_c};{NL}"
-                    f"for (int32_t {i_var} = 0; {i_var} < {src_ref}.len; {i_var}++) {{"
-                    f" {acc} = {lam_fn}({acc}, {src_ref}.data[{i_var}], {lam_env}); }}{NL}"
+                    f"for (int32_t {i_var} = 0; {i_var} < {src_ref}.len; {i_var}++){{"
+                    + loop_body +
                     f"{src_free}"
                     f"{acc};"
                     f"{CLOSE}"
