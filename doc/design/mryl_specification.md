@@ -1,7 +1,7 @@
 ﻿# Mryl プログラミング言語 - 言語詳細仕様書
 
 **バージョン**: 0.6.0
-**最終更新**: 2026年4月5日
+**最終更新**: 2026年4月6日
 
 ---
 
@@ -146,7 +146,12 @@ Mryl/
 │   ├── test_42_iter_lambda_param_count.ml # Iter<T> ラムダ引数数チェック（#69、C0）
 │   ├── test_43_task_when_all_any.ml     # Task::when_all / Task::when_any コンビネータ（#61、C0/C1）
 │   ├── test_44_async_cancel.ml          # weak / cancel Task キャンセル機構（#52、C0/C1）
-│   └── test_45_observable.ml            # Observable<T> / Subject<T> リアクティブストリーム（#45、C0/C1）
+│   ├── test_45_observable.ml            # Observable<T> / Subject<T> リアクティブストリーム（#45、C0/C1）
+│   ├── test_46_array_literal_free.ml    # string[]/ArrayLiteral Vec 追跡・mryl_str_split 挿入位置修正（#78、C0/C1）
+│   ├── test_47_aggregate_string.ml      # aggregate() string deep copy・ラムダ戻り値型推論（#81、C0）
+│   ├── test_48_match_box_return.ml      # match Some(b) バインド変数の二重 free 修正（#79、C0）
+│   ├── test_49_if_block_scope.ml        # if/else ブロック内リソーススコープ管理（#94、C0/C1）
+│   └── test_50_struct_destructor_order.ml # 相互参照 struct デストラクタ前方宣言（#80、C0）
 ├── my/                               # 動作確認用 Mryl コード置き場
 ├── bin/
 │   ├── Mryl.c                # 生成された C ソースコード

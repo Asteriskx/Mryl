@@ -1305,6 +1305,7 @@ fn example() {
 ```
 
 ネストした struct（フィールドに別の struct を持つ場合）も再帰的に解放されます。
+定義順が不定の場合（相互参照など）もコンパイラが前方宣言を自動生成するため、手動宣言は不要です。
 
 ```mryl
 struct Inner {
@@ -2206,6 +2207,11 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_43_task_when_all_any.ml](../tests/test_43_task_when_all_any.ml) | `Task::when_all` / `Task::when_any` コンビネータ（#61、C0/C1） | ✅ Python + C + Native |
 | [tests/test_44_async_cancel.ml](../tests/test_44_async_cancel.ml) | `weak` / `cancel` Task キャンセル機構（#52、C0/C1） | ✅ Python + C + Native |
 | [tests/test_45_observable.ml](../tests/test_45_observable.ml) | `Observable<T>` / `Subject<T>` リアクティブストリーム（#45、C0/C1）i32 / string / struct 型テスト含む | ✅ Python + C + Native |
+| [tests/test_46_array_literal_free.ml](../tests/test_46_array_literal_free.ml) | `string[]`/`ArrayLiteral` Vec 追跡・`mryl_str_split` 挿入位置修正（#78、C0/C1） | ✅ Python + C + Native |
+| [tests/test_47_aggregate_string.ml](../tests/test_47_aggregate_string.ml) | `aggregate()` string deep copy・ラムダ戻り値型推論（#81、C0） | ✅ Python + C + Native |
+| [tests/test_48_match_box_return.ml](../tests/test_48_match_box_return.ml) | `match Some(b)` バインド変数の二重 free 修正（#79、C0） | ✅ Python + C + Native |
+| [tests/test_49_if_block_scope.ml](../tests/test_49_if_block_scope.ml) | if/else ブロック内リソーススコープ管理（#94、C0/C1） | ✅ Python + C + Native |
+| [tests/test_50_struct_destructor_order.ml](../tests/test_50_struct_destructor_order.ml) | 相互参照 struct デストラクタ前方宣言（#80、C0） | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 
