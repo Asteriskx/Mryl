@@ -492,6 +492,18 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             if isinstance(pattern, (BindingPattern, StructPattern)):
                 has_catch_all = True
 
+            # Option<Box<T>> の Some(b) バインドを追跡する（#79）
+            # match Some(b) => return b のとき、b = mv.value だが
+            # _generate_return は return_var_c="b", option_var="mv" とみなす。
+            # b → mv のマッピングを記録し、return b 時に mv の free をスキップさせる。
+            from Parser import EnumPattern as _EnumPattern
+            if (isinstance(pattern, _EnumPattern)
+                    and pattern.enum_name == "Some"
+                    and pattern.bindings
+                    and scrutinee_type.startswith("MrylOption_")):
+                for bname in pattern.bindings:
+                    self.match_box_bindings[bname] = mv
+
             if cond == "1":
                 kw        = "else" if not first else ""
                 cond_part = ""

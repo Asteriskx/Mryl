@@ -104,6 +104,7 @@ class CodeGenerator(
         self.local_toarray_vec_vars      = []    # [c_var_name] to_array() 結果の Vec 変数（.data を free）
         self.local_struct_box_vars       = []    # [(c_var_name, struct_name)] Box フィールド持ち struct 変数（#68）
         self.local_option_box_vars       = []    # [c_var_name] Option<Box<T>> 変数（#67）
+        self.match_box_bindings          = {}    # {binding_c_name: option_c_var_name} match Some(b) のバインド追跡（#79）
 
     # ------------------------------------------------------------------
     # メインエントリポイント
@@ -141,6 +142,7 @@ class CodeGenerator(
         self.local_toarray_vec_vars      = []    # [c_var_name] to_array() 結果の Vec 変数
         self.local_struct_box_vars       = []    # [(c_var_name, struct_name)] Box フィールド持ち struct（#68）
         self.local_option_box_vars       = []    # [c_var_name] Option<Box<T>>（#67）
+        self.match_box_bindings          = {}    # {binding_c_name: option_c_var_name}（#79）
 
         # 全関数をキャッシュ
         self.program_functions = {func.name: func for func in program.functions}
@@ -483,6 +485,7 @@ class CodeGenerator(
         self.local_toarray_vec_vars = []    # to_array() 結果 Vec 変数追跡（関数スコープ）
         self.local_struct_box_vars  = []    # Box フィールド持ち struct 変数追跡（#68）
         self.local_option_box_vars  = []    # Option<Box<T>> 変数追跡（#67）
+        self.match_box_bindings     = {}    # {binding_c_name: option_c_var_name}（#79）
         self.temp_string_counter = 0
         saved_renames            = self.ident_renames.copy()
         self.ident_renames       = {}
@@ -646,6 +649,7 @@ class CodeGenerator(
         self.local_toarray_vec_vars = []
         self.local_struct_box_vars  = []
         self.local_option_box_vars  = []
+        self.match_box_bindings     = {}    # {binding_c_name: option_c_var_name}（#79）
 
         # env に self と引数を登録（_infer_expr_type が struct フィールド型を解決できるようにする）
         method_env: dict = {}

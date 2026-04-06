@@ -579,8 +579,11 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
             if vn != return_var_c:
                 self._emit(f"mryl_free_{sname}({vn});")
         # Option<Box<T>> 変数: 返値はスキップして has_value なら Box を free（#67）
+        # return_var_c が Some(b) バインド変数の場合は、その元になった option 変数のフリーもスキップする（#79）
+        # （b = mv.value のエイリアスのため、free(mv.value) は use-after-free になる）
+        skipped_option_var = self.match_box_bindings.get(return_var_c) if return_var_c else None
         for vn in reversed(self.local_option_box_vars):
-            if vn != return_var_c:
+            if vn != return_var_c and vn != skipped_option_var:
                 self._emit(f"if ({vn}.has_value) {{ free({vn}.value); }}")
 
         if stmt.expr:
@@ -646,13 +649,38 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         else:
             self._emit("return;")
 
+    def _save_block_state(self):
+        """ブロック開始前の追跡リスト長をスナップショットとして返す（#94）。
+        _restore_block_state とペアで使い、ブロック終端でスコープ内変数を解放する。"""
+        return (
+            list(self.local_string_vars),
+            len(self.local_box_vars),
+            len(self.local_box_vec_vars),
+            len(self.local_toarray_vec_vars),
+            len(self.local_struct_box_vars),
+            len(self.local_option_box_vars),
+        )
+
+    def _restore_block_state(self, state):
+        """ブロック終端でスコープ内変数を解放し、追跡リストを保存時の状態に復元する（#94）。
+        _emit_loop_iteration_cleanup と同じ処理だが if ブロック向けに命名を分けている。"""
+        saved_str, saved_box, saved_bv, saved_tav, saved_sbv, saved_obv = state
+        self._emit_loop_iteration_cleanup(
+            saved_str, saved_box, saved_bv, saved_tav, saved_sbv, saved_obv
+        )
+
     def _generate_if(self, stmt):
-        """if/else if/else 文を出力する """
+        """if/else if/else 文を出力する。
+        各ブランチのスコープ内で宣言された Box / Vec / Option<Box> 等のリソースを
+        ブランチ終端で解放する（#94: if ブロック内変数のスコープ外アクセス防止）。
+        """
         cond = self._generate_expr(stmt.condition)
         self._emit(f"if ({self._strip_outer_parens(cond)}) {{")
         self.indent_level += 1
+        state = self._save_block_state()
         for s in stmt.then_block.statements:
             self._generate_statement(s)
+        self._restore_block_state(state)
         self.indent_level -= 1
 
         cur = stmt.else_block
@@ -661,15 +689,19 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                 cur_cond = self._generate_expr(cur.condition)
                 self._emit(f"}} else if ({self._strip_outer_parens(cur_cond)}) {{")
                 self.indent_level += 1
+                state = self._save_block_state()
                 for s in cur.then_block.statements:
                     self._generate_statement(s)
+                self._restore_block_state(state)
                 self.indent_level -= 1
                 cur = cur.else_block
             else:
                 self._emit("} else {")
                 self.indent_level += 1
+                state = self._save_block_state()
                 for s in cur.statements:
                     self._generate_statement(s)
+                self._restore_block_state(state)
                 self.indent_level -= 1
                 cur = None
 
