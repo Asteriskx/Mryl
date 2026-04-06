@@ -173,9 +173,23 @@ class CodeGenerator(
         for enum_decl in program.enums:
             self._generate_enum(enum_decl)
 
-        # 構造体の出力
+        # 構造体の typedef 定義を出力（デストラクタはここでは出力しない）
         for struct in program.structs:
             self._generate_struct(struct)
+
+        # 全 struct typedef の後にデストラクタ前方宣言 → 定義を出力する（#80）
+        # デストラクタが他の struct のデストラクタを呼ぶ場合（相互参照）、
+        # 宣言順に関わらず前方宣言があればコンパイルエラーにならない。
+        destructor_protos = [
+            s for s in program.structs
+            if not getattr(s, 'type_params', None) and self._struct_has_box_fields(s)
+        ]
+        if destructor_protos:
+            self._emit("// Struct destructor forward declarations (#80)")
+            for s in destructor_protos:
+                self._emit(f"static inline void mryl_free_{s.name}({s.name} s);")
+            self._emit("")
+        self._generate_struct_destructors(program.structs)
 
         # ジェネリック構造体の具体化 typedef を出力 (例: Box_i32, Pair_i32_string)
         generic_uses = self._scan_generic_struct_uses(program)

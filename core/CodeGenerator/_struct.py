@@ -57,8 +57,8 @@ class CodeGeneratorStructMixin(_CodeGeneratorBase):
         self._emit("")
 
     def _generate_struct(self, struct):
-        """構造体宣言を typedef struct として出力する。
-        Box<T> フィールドを持つ struct には mryl_free_StructName() デストラクタも生成する（#68）。"""
+        """構造体宣言を typedef struct として出力する（デストラクタは含まない）。
+        デストラクタは _generate_struct_destructors で全 struct 定義後に一括出力する（#80）。"""
         if getattr(struct, 'type_params', None):
             return  # ジェネリック構造体は具体化時に _scan_generic_struct_uses で出力
         self._emit(f"// Struct: {struct.name}")
@@ -70,8 +70,15 @@ class CodeGeneratorStructMixin(_CodeGeneratorBase):
         self.indent_level -= 1
         self._emit(f"}} {struct.name};")
         self._emit("")
-        # Box<T> フィールドを持つ struct はデストラクタを生成する（#68）
-        self._emit_struct_destructor(struct)
+
+    def _generate_struct_destructors(self, structs) -> None:
+        """全 struct の typedef 出力後にデストラクタを一括出力する（#80）。
+        前方宣言 → 定義 の 2 パス方式で相互参照・依存順不定を解消する。
+        前方宣言は __init__.py の generate() 内で struct typedef 群の直後に挿入済み。"""
+        for struct in structs:
+            if getattr(struct, 'type_params', None):
+                continue
+            self._emit_struct_destructor(struct)
 
     def _generate_enum(self, enum_decl):
         """EnumDecl を C コードとして出力する
