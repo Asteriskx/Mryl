@@ -276,7 +276,7 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                     call_args    = ", ".join(p.name for p in method.params)
                     ret_kw       = "return " if t_ret != "void" else ""
                     self.pending_lambdas.append(
-                        (thunk_name, t_ret, t_params_str, [f"    {ret_kw}{c_func_name}({call_args});"], {})
+                        (thunk_name, t_ret, t_params_str, [f"    {ret_kw}{c_func_name}({call_args});"], {}, set())
                     )
                     arg_cs_t = [self._type_to_c(p.type_node) if p.type_node else "int32_t" for p in method.params]
                     self.lambda_captures[thunk_name] = {'captures': {}, 'ret_c': t_ret, 'arg_cs': arg_cs_t}

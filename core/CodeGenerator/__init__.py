@@ -285,12 +285,16 @@ class CodeGenerator(
                 self.pending_async_lambda_blocks = []
             if self.pending_lambdas:
                 lambda_lines.append("// ===== Lambda static helper functions =====")
-            for (lam_name, ret_type, params_str, body_lines, captures) in self.pending_lambdas:
+            for (lam_name, ret_type, params_str, body_lines, captures, mutable_captures) in self.pending_lambdas:
                 if captures:
                     env_struct   = f"{lam_name}_env_t"
                     lambda_lines.append(f"typedef struct {{")
                     for cap_name, cap_c_type in captures.items():
-                        lambda_lines.append(f"    {cap_c_type} {cap_name};")
+                        # ミュータブルキャプチャはポインタ型で格納（#83）
+                        if cap_name in mutable_captures:
+                            lambda_lines.append(f"    {cap_c_type}* {cap_name};")
+                        else:
+                            lambda_lines.append(f"    {cap_c_type} {cap_name};")
                     lambda_lines.append(f"}} {env_struct};")
                     # fat pointer 規約: void* __e を最終引数、body 先頭でキャスト
                     # params_str が "void" の場合は "void, void* __e" にならないよう注意
@@ -435,12 +439,16 @@ class CodeGenerator(
             for i, ln in enumerate(lambda_lines):
                 self.code.insert(insert_pos + i, ln)
             return
-        for (lam_name, ret_type, params_str, body_lines, captures) in self.pending_lambdas:
+        for (lam_name, ret_type, params_str, body_lines, captures, mutable_captures) in self.pending_lambdas:
             if captures:
                 env_struct = f"{lam_name}_env_t"
                 lambda_lines.append(f"typedef struct {{")
                 for cap_name, cap_c_type in captures.items():
-                    lambda_lines.append(f"    {cap_c_type} {cap_name};")
+                    # ミュータブルキャプチャはポインタ型で格納（#83）
+                    if cap_name in mutable_captures:
+                        lambda_lines.append(f"    {cap_c_type}* {cap_name};")
+                    else:
+                        lambda_lines.append(f"    {cap_c_type} {cap_name};")
                 lambda_lines.append(f"}} {env_struct};")
                 # fat pointer 規約: void* __e を最終引数、body 先頭でキャスト
                 # params_str が "void" の場合は "void, void* __e" にならないよう注意

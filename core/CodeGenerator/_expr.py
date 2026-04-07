@@ -330,7 +330,7 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                     ret_kw       = "return " if t_ret != "void" else ""
                     # thunk 本体: c_func_name = C 関数名（static メソッドは "Struct_method" 形式）
                     self.pending_lambdas.append(
-                        (thunk_name, t_ret, t_params_str, [f"    {ret_kw}{c_func_name}({call_args});"], {})
+                        (thunk_name, t_ret, t_params_str, [f"    {ret_kw}{c_func_name}({call_args});"], {}, set())
                     )
                     arg_cs_t = [self._type_to_c(p.type_node) if p.type_node else "int32_t" for p in fn_decl.params]
                     self.lambda_captures[thunk_name] = {'captures': {}, 'ret_c': t_ret, 'arg_cs': arg_cs_t}
@@ -935,14 +935,19 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             """
             arg = expr.args[arg_idx]
             if isinstance(arg, Lambda):
-                lam_name_v = self._generate_lambda(arg)
-                info       = self.lambda_captures.get(lam_name_v, {})
-                captures   = info.get('captures', {})
+                lam_name_v       = self._generate_lambda(arg)
+                info             = self.lambda_captures.get(lam_name_v, {})
+                captures         = info.get('captures', {})
+                mutable_captures = info.get('mutable_captures', set())
                 if captures:
                     env_struct = f"{lam_name_v}_env_t"
                     env_var    = f"__lam_env_{idx}_{arg_idx}"
-                    fields     = ", ".join(
-                        f".{n} = {self.ident_renames.get(n, _safe_c_name(n))}" for n in captures
+                    # ミュータブルキャプチャは &var、読み取り専用は var で初期化（#83）
+                    fields = ", ".join(
+                        f".{n} = &{self.ident_renames.get(n, _safe_c_name(n))}"
+                        if n in mutable_captures else
+                        f".{n} = {self.ident_renames.get(n, _safe_c_name(n))}"
+                        for n in captures
                     )
                     env_setup  = f"{env_struct} {env_var} = {{{fields}}};{NL}"
                     env_arg    = f"&{env_var}"
@@ -976,7 +981,7 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
                     call_args    = ", ".join(p.name for p in fn_decl.params)
                     ret_kw       = "return " if t_ret != "void" else ""
                     thunk_body   = [f"    {ret_kw}{fn_decl.name}({call_args});"]
-                    self.pending_lambdas.append((thunk_name, t_ret, t_params_str, thunk_body, {}))
+                    self.pending_lambdas.append((thunk_name, t_ret, t_params_str, thunk_body, {}, set()))
                     arg_cs_t = [self._type_to_c(p.type_node) if p.type_node else "int32_t" for p in fn_decl.params]
                     self.lambda_captures[thunk_name] = {'captures': {}, 'ret_c': t_ret, 'arg_cs': arg_cs_t}
                     return "", thunk_name, "NULL"

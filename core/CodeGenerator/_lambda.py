@@ -37,6 +37,41 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
                         return True
         return False
 
+    def _collect_mutable_captures(self, node, param_names: set) -> set:
+        """ラムダ本体で代入される外部変数名を収集する（ミュータブルキャプチャ判定）。
+        Assignment の LHS が param_names 外の VarRef であればミュータブルと判定する。
+        """
+        mutable = set()
+
+        def walk(n):
+            if n is None:
+                return
+            cls = n.__class__.__name__
+            if cls == 'Assignment':
+                # LHS がラムダパラメータ外の変数参照 → ミュータブルキャプチャ
+                if n.target.__class__.__name__ == 'VarRef' and n.target.name not in param_names:
+                    mutable.add(n.target.name)
+                walk(n.expr)
+            elif cls == 'Block':
+                for s in n.statements:
+                    walk(s)
+            elif cls == 'ExprStmt':
+                walk(n.expr)
+            elif cls in ('IfStmt', 'IfExpr'):
+                walk(n.condition)
+                walk(n.then_block)
+                if n.else_block:
+                    walk(n.else_block)
+            elif cls in ('ForStmt', 'WhileStmt'):
+                if n.body:
+                    walk(n.body)
+            elif cls == 'LetDecl':
+                if n.init_expr:
+                    walk(n.init_expr)
+
+        walk(node)
+        return mutable
+
     def _collect_captures(self, node, param_names: set) -> dict:
         """ラムダ本体からクロージャキャプチャ変数を収集する。
         戻り値: {変数名: C型文字列}
@@ -73,6 +108,9 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
             elif cls == 'Block':
                 for s in n.statements:
                     walk(s)
+            elif cls == 'Assignment':
+                walk(n.target)
+                walk(n.expr)
             elif cls == 'LetDecl':
                 if n.init_expr:
                     walk(n.init_expr)
@@ -102,8 +140,10 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
         if getattr(expr, 'is_async', False):
             return self._generate_async_lambda(expr, lam_name)
 
-        param_names = {p.name for p in expr.params}
-        captures    = self._collect_captures(expr.body, param_names)
+        param_names  = {p.name for p in expr.params}
+        captures     = self._collect_captures(expr.body, param_names)
+        # ミュータブルキャプチャ（ラムダ内で代入される変数）をポインタ経由で渡す（#83）
+        mutable_set  = self._collect_mutable_captures(expr.body, param_names)
 
         params_c = []
         for p in expr.params:
@@ -121,7 +161,11 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
         self.local_string_vars = []
         self.temp_string_counter = 0
         if captures:
-            self.capture_map = {n: f"__env->{n}" for n in captures}
+            # ミュータブル変数は *(__env->n)、読み取り専用は __env->n でアクセス
+            self.capture_map = {
+                n: (f"*(__env->{n})" if n in mutable_set else f"__env->{n}")
+                for n in captures
+            }
 
         # ラムダパラメータを env に一時追加し、body 内の型推論を正確にする
         # (例: (xs: i32[]) => xs で xs の型 vec_i32 が _infer_expr_type から取れるようにする)
@@ -179,13 +223,14 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
         self.local_string_vars = saved_local_str_vars
         self.temp_string_counter = saved_temp_str_ctr
 
-        self.pending_lambdas.append((lam_name, ret_type, params_str, body_lines, captures))
-        # fat pointer のため arg_cs / ret_c / captures を登録（_stmt.py / _expr.py が参照）
+        self.pending_lambdas.append((lam_name, ret_type, params_str, body_lines, captures, mutable_set))
+        # fat pointer のため arg_cs / ret_c / captures / mutable_captures を登録（_stmt.py / _expr.py が参照）
         arg_cs = [self._type_to_c(p.type_node) if p.type_node else "int32_t" for p in expr.params]
         self.lambda_captures[lam_name] = {
-            'captures': captures,
-            'ret_c':    ret_type,
-            'arg_cs':   arg_cs,
+            'captures':         captures,
+            'mutable_captures': mutable_set,
+            'ret_c':            ret_type,
+            'arg_cs':           arg_cs,
         }
         return lam_name
 
@@ -205,8 +250,10 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
             params_str = ", ".join(params_c) if params_c else "void"
             return lam_name, "MrylTask*", params_str, {}
 
-        param_names = {p.name for p in expr.params}
-        captures    = self._collect_captures(expr.body, param_names)
+        param_names  = {p.name for p in expr.params}
+        captures     = self._collect_captures(expr.body, param_names)
+        # ミュータブルキャプチャ（ラムダ内で代入される変数）をポインタ経由で渡す（#83）
+        mutable_set  = self._collect_mutable_captures(expr.body, param_names)
 
         params_c = []
         for p in expr.params:
@@ -236,7 +283,11 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
         self.local_string_vars = []
         self.temp_string_counter = 0
         if captures:
-            self.capture_map = {n: f"__env->{n}" for n in captures}
+            # ミュータブル変数は *(__env->n)、読み取り専用は __env->n でアクセス
+            self.capture_map = {
+                n: (f"*(__env->{n})" if n in mutable_set else f"__env->{n}")
+                for n in captures
+            }
 
         if isinstance(expr.body, Block):
             for stmt in expr.body.statements:
@@ -251,13 +302,14 @@ class CodeGeneratorLambdaMixin(_CodeGeneratorBase):
         self.local_string_vars = saved_local_str_vars
         self.temp_string_counter = saved_temp_str_ctr
 
-        self.pending_lambdas.append((lam_name, ret_type, params_str, body_lines_code, captures))
-        # fat pointer のため arg_cs / ret_c / captures を登録
+        self.pending_lambdas.append((lam_name, ret_type, params_str, body_lines_code, captures, mutable_set))
+        # fat pointer のため arg_cs / ret_c / captures / mutable_captures を登録
         arg_cs = [self._type_to_c(p.type_node) if p.type_node else "int32_t" for p in expr.params]
         self.lambda_captures[lam_name] = {
-            'captures': captures,
-            'ret_c':    ret_type,
-            'arg_cs':   arg_cs,
+            'captures':         captures,
+            'mutable_captures': mutable_set,
+            'ret_c':            ret_type,
+            'arg_cs':           arg_cs,
         }
         return lam_name, ret_type, params_str, captures
 

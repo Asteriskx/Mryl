@@ -2212,6 +2212,7 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_48_match_box_return.ml](../tests/test_48_match_box_return.ml) | `match Some(b)` バインド変数の二重 free 修正（#79、C0） | ✅ Python + C + Native |
 | [tests/test_49_if_block_scope.ml](../tests/test_49_if_block_scope.ml) | if/else ブロック内リソーススコープ管理（#94、C0/C1） | ✅ Python + C + Native |
 | [tests/test_50_struct_destructor_order.ml](../tests/test_50_struct_destructor_order.ml) | 相互参照 struct デストラクタ前方宣言（#80、C0） | ✅ Python + C + Native |
+| [tests/test_51_for_each_mutable_capture.ml](../tests/test_51_for_each_mutable_capture.ml) | `for_each` ラムダ内ミュータブルキャプチャ（#83、C0/C1） | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 
