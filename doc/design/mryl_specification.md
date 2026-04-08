@@ -1,7 +1,7 @@
 ﻿# Mryl プログラミング言語 - 言語詳細仕様書
 
 **バージョン**: 0.7.0
-**最終更新**: 2026年4月7日
+**最終更新**: 2026年4月8日
 
 ---
 
@@ -509,6 +509,8 @@ arr.for_each(...);            // OK: 文として使用
 | ラムダ引数型検査が浅い | `issue_iter_lambda_typecheck_shallow.md` | ⚠️ #63 未対応 |
 | ラムダ引数数チェック未実装 | `issue_iter_lambda_param_count.md` | ✅ v0.6.0 #69 解決 |
 | `for_each` ラムダ内ミュータブルキャプチャ非対応 | `issue_for_each_mutable_capture.md` | ✅ v0.7.0 #83 解決 |
+| iter 系 `MrylVec` 二重 free | `issue_iter_vec_double_free.md` | ✅ v0.7.0 #96 解決 |
+| `string[]` 要素 `char*` のメモリリーク | `issue_vec_string_elem_not_freed.md` | ✅ v0.7.0 #97 解決 |
 | 多次元配列（`i32[][]` 以上）未対応 | `issue_2d_array_unsupported.md` | ⚠️ #82 v0.7.0 候補 |
 | `select_many` VarRef ラムダ時の所有権 | — | ⚠️ 将来の所有権機能で対応予定 |
 

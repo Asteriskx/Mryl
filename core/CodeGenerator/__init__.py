@@ -577,9 +577,9 @@ class CodeGenerator(
             # Vec<Box<T>> 変数: 要素を先に free してから .data を free
             for (vn, _inner_tn) in reversed(self.local_box_vec_vars):
                 self._emit_box_vec_free(vn)
-            # to_array() 結果 Vec 変数: .data を free（#71）
-            for vn in reversed(self.local_toarray_vec_vars):
-                self._emit(f"free({vn}.data);")
+            # to_array() 結果 Vec 変数: 解放（#71, #97）
+            for (vn, et) in reversed(self.local_toarray_vec_vars):
+                self._emit_toarray_vec_free(vn, et)
             # Box フィールド持ち struct 変数: デストラクタを呼ぶ（#68）
             for (vn, sname) in reversed(self.local_struct_box_vars):
                 self._emit(f"mryl_free_{sname}({vn});")
@@ -702,9 +702,9 @@ class CodeGenerator(
                 self._emit_box_free(vn, tn)
             for (vn, _tn) in reversed(self.local_box_vec_vars):
                 self._emit_box_vec_free(vn)
-            # to_array() 結果 Vec 変数: .data を free（#71）
-            for vn in reversed(self.local_toarray_vec_vars):
-                self._emit(f"free({vn}.data);")
+            # to_array() 結果 Vec 変数: 解放（#71, #97）
+            for (vn, et) in reversed(self.local_toarray_vec_vars):
+                self._emit_toarray_vec_free(vn, et)
             # Box フィールド持ち struct 変数: デストラクタを呼ぶ（#68）
             for (vn, sname) in reversed(self.local_struct_box_vars):
                 self._emit(f"mryl_free_{sname}({vn});")

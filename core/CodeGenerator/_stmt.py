@@ -7,9 +7,8 @@ def _iter_chain_owns_alloc(expr) -> bool:
     """Iter チェーンの末端 to_array() 結果が独立した malloc を持つかを判定する。
 
     - filter / select / select_many: 常に新 alloc → owned
-    - take: source の .data を共有 → source の ownership を継承
-    - skip(src が MethodCall): 中間 Iter は新 alloc → owned
-    - skip(src が VarRef): ポインタ算術（view）→ 新 alloc なし
+    - skip: src_is_temp / user var いずれも mryl_vec_new() で新規確保 → owned
+    - take: source の .data を共有（struct コピー） → source の ownership を継承
     - その他 / VarRef: ユーザー変数の borrow の可能性 → unsafe
     """
     cls = expr.__class__.__name__
@@ -20,11 +19,11 @@ def _iter_chain_owns_alloc(expr) -> bool:
     if method in ('filter', 'select', 'select_many'):
         return True
     if method == 'take':
-        # take は source alloc を共有するため source の ownership を継承
+        # take は struct コピーで source の .data を共有するため source の ownership を継承
         return _iter_chain_owns_alloc(expr.obj)
     if method == 'skip':
-        # skip の src が中間 MethodCall なら新 alloc、VarRef なら view
-        return expr.obj.__class__.__name__ == 'MethodCall'
+        # skip は src_is_temp / user var どちらの場合も mryl_vec_new() で独立確保 → owned
+        return True
     return False
 
 class CodeGeneratorStmtMixin(_CodeGeneratorBase):
@@ -83,6 +82,16 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         self._emit("}")
         self._emit(f"free({c_var_name}.data);")
 
+    def _emit_toarray_vec_free(self, c_var_name: str, et: str) -> None:
+        """to_array() / ArrayLiteral 結果 Vec の free 文を生成する。
+        string 要素の場合は mryl_vec_string_free で各要素の char* も解放する。
+        それ以外はプリミティブ値のため free(vn.data) のみ（#97）。
+        """
+        if et == "string":
+            self._emit(f"mryl_vec_string_free({c_var_name});")
+        else:
+            self._emit(f"free({c_var_name}.data);")
+
     def _emit_loop_iteration_cleanup(
         self, saved_str_vars: list, saved_box_count: int, saved_bv_count: int,
         saved_tav_count: int = 0, saved_sbv_count: int = 0, saved_obv_count: int = 0
@@ -102,9 +111,9 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         for (vn, _tn) in reversed(self.local_box_vec_vars[saved_bv_count:]):
             self._emit_box_vec_free(vn)
         self.local_box_vec_vars = self.local_box_vec_vars[:saved_bv_count]
-        # to_array() 結果 Vec 変数: ループ内で宣言されたものを解放（#71）
-        for vn in reversed(self.local_toarray_vec_vars[saved_tav_count:]):
-            self._emit(f"free({vn}.data);")
+        # to_array() 結果 Vec 変数: ループ内で宣言されたものを解放（#71, #97）
+        for (vn, et) in reversed(self.local_toarray_vec_vars[saved_tav_count:]):
+            self._emit_toarray_vec_free(vn, et)
         self.local_toarray_vec_vars = self.local_toarray_vec_vars[:saved_tav_count]
         # Box フィールド持ち struct 変数: デストラクタを呼ぶ（#68）
         for (vn, sname) in reversed(self.local_struct_box_vars[saved_sbv_count:]):
@@ -339,31 +348,32 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                 self.local_box_vec_vars.append((stmt.name, inner_tn))
             else:
                 ct = _c_map.get(et, "int32_t")
-            # to_array() 結果を代入する場合は .data の free が必要なため追跡する（#71）
-            # ただし take/skip(on user var) は .data をソースと共有するため free 不可。
-            # _iter_chain_owns_alloc() で ownership を確認してから登録する。
-            if (stmt.init_expr is not None
+            # to_array() 呼び出しかどうか（ownership 有無に関わらず）
+            is_to_array_call = (stmt.init_expr is not None
                     and init_expr_class != "ArrayLiteral"
                     and stmt.init_expr.__class__.__name__ == "MethodCall"
-                    and stmt.init_expr.method == "to_array"
-                    and _iter_chain_owns_alloc(stmt.init_expr.obj)):
-                self.local_toarray_vec_vars.append(_safe_c_name(stmt.name))
+                    and stmt.init_expr.method == "to_array")
+            # ownership あり: filter/select/skip(chain) 等 → 解放が必要（#71）
+            # ownership なし: take(user_var) 等 → ソースと .data を共有するため free 不可（#96）
+            if is_to_array_call and _iter_chain_owns_alloc(stmt.init_expr.obj):
+                self.local_toarray_vec_vars.append((_safe_c_name(stmt.name), et))
             if init_expr_class == "ArrayLiteral" and stmt.init_expr.elements:
                 elements  = [self._generate_expr(elem) for elem in stmt.init_expr.elements]
                 elems_str = ", ".join(elements)
                 n         = len(stmt.init_expr.elements)
                 self._emit(f"MrylVec_{et} {stmt.name} = mryl_vec_{et}_from(({ct}[]){{{elems_str}}}, {n});")
-                # mryl_vec_from() は malloc するため、Box<T>[] 以外はスコープ終了時に .data を free する（#78）
+                # mryl_vec_from() は malloc するため、Box<T>[] 以外はスコープ終了時に解放する（#78, #97）
                 # Box<T>[] は local_box_vec_vars で管理済みなので除外する
                 if not et.startswith("Box_"):
-                    self.local_toarray_vec_vars.append(_safe_c_name(stmt.name))
+                    self.local_toarray_vec_vars.append((_safe_c_name(stmt.name), et))
             elif stmt.init_expr is not None and init_expr_class != "ArrayLiteral":
                 # split() など Vec を返す式で初期化（例: mryl_str_split(...)）
-                # これらも新規 malloc が発生するため .data free が必要（#78）
+                # これらも新規 malloc が発生するため解放が必要（#78, #97）
                 rhs = self._generate_expr(stmt.init_expr)
                 self._emit(f"MrylVec_{et} {stmt.name} = {rhs};")
-                if not et.startswith("Box_"):
-                    self.local_toarray_vec_vars.append(_safe_c_name(stmt.name))
+                # to_array() 呼び出しはすべて上のブロックで処理済みか free 不可なため除外（#96）
+                if not et.startswith("Box_") and not is_to_array_call:
+                    self.local_toarray_vec_vars.append((_safe_c_name(stmt.name), et))
             else:
                 self._emit(f"MrylVec_{et} {stmt.name} = mryl_vec_{et}_new();")
             self.vec_var_types[stmt.name] = et
@@ -570,10 +580,10 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
         # Vec<Box<T>> 変数: 要素を先に free してから .data を free
         for (vn, _inner_tn) in reversed(self.local_box_vec_vars):
             self._emit_box_vec_free(vn)
-        # to_array() 結果 Vec 変数: 返値はスキップして .data を free（#71）
-        for vn in reversed(self.local_toarray_vec_vars):
+        # to_array() 結果 Vec 変数: 返値はスキップして解放（#71, #97）
+        for (vn, et) in reversed(self.local_toarray_vec_vars):
             if vn != return_var_c:
-                self._emit(f"free({vn}.data);")
+                self._emit_toarray_vec_free(vn, et)
         # Box フィールド持ち struct 変数: 返値はスキップしてデストラクタを呼ぶ（#68）
         for (vn, sname) in reversed(self.local_struct_box_vars):
             if vn != return_var_c:
