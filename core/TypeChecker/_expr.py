@@ -104,18 +104,22 @@ class TypeCheckerExprMixin(_TypeCheckerBase):
                 T = elem_type.type_args[0]
                 if T.name == "void":
                     raise TypeError_(f"Task::{expr.variant_name}: void Task is not supported", expr)
-                if T.name == "Result":
-                    raise TypeError_(f"Task::{expr.variant_name}: Result<T,E> Task is not supported in v0.6.0 (see issue)", expr)
                 # 全要素の型が一致することを確認
                 for elem in arr.elements[1:]:
                     et = self.check_expr(elem)
                     if not self.types_equal(et, elem_type):
                         raise TypeError_(f"Task::{expr.variant_name}: all tasks must have the same type, got {et} and {elem_type}", elem)
-                # CodeGenerator で型別ランタイム関数を選択できるよう T 名を AST ノードに付与
-                expr._combinator_elem_type = T.name
+                # CodeGenerator で型別ランタイム関数を選択できるよう T キーと TypeNode を AST に付与
+                # _tc_type_key: Result<i32,string> → "Result_i32_string"（再帰的複合キー）
+                def _tc_type_key(t):
+                    if not getattr(t, 'type_args', None):
+                        return t.name
+                    return t.name + "_" + "_".join(_tc_type_key(a) for a in t.type_args)
+                expr._combinator_elem_type = _tc_type_key(T)
+                expr._combinator_elem_type_node = T  # CodeGenerator の _type_to_c 用
                 if expr.variant_name == "when_all":
-                    # Future<T[]>
-                    return TypeNode("Future", type_args=[TypeNode(T.name, array_size=-1)])
+                    # Future<T[]>: type_args を保持して Result の型引数を失わない
+                    return TypeNode("Future", type_args=[TypeNode(T.name, array_size=-1, type_args=list(T.type_args))])
                 else:
                     # Future<T>
                     return TypeNode("Future", type_args=[T])

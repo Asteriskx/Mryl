@@ -587,9 +587,11 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
     def _emit_combinator_helpers(self, combinator_types: dict):
         """Task::when_all / Task::when_any の型別 C ランタイム関数を出力する。
 
-        combinator_types: { mryl_type_name: set_of_combinators }
-          例: {"i32": {"when_all", "when_any"}, "f64": {"when_all"}}
-        MrylVec_<T> ヘルパーより後に呼ぶこと（mryl_vec_<T>_push を使用するため）。
+        combinator_types: { T_key: (set_of_combinators, TypeNode) }
+          例: {"i32": ({"when_all", "when_any"}, TypeNode("i32")),
+               "Result_i32_string": ({"when_any"}, TypeNode("Result", type_args=[...]))}
+        primitive 型: mryl_vec_<T>_push を使用（MrylVec ヘルパー出力後に呼ぶこと）。
+        struct 型 (Result 等): MrylVec typedef と配列構築をインライン生成（mryl_vec_* 非依存）。
         """
         if not combinator_types:
             return
@@ -598,19 +600,34 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
         self._emit("// ============================================================")
         self._emit("")
 
-        for T, combinators in sorted(combinator_types.items()):
-            # T は文字列（例 "i32"）、C は対応する C 型名
-            C = self._type_to_c(TypeNode(T))
+        # struct 型（Result 等）を判定するプリミティブキーセット
+        _PRIMITIVE_KEYS = {
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+            "f32", "f64", "bool", "string",
+        }
+
+        for T, (combinators, T_node) in sorted(combinator_types.items()):
+            # C 型名を取得（_type_to_c の副作用で result_type_registry にも登録される）
+            C = self._type_to_c(T_node)
+            # struct 型フラグ: primitive でない型（Result 等）は Vec をインライン生成する
+            is_struct = T_node.name not in _PRIMITIVE_KEYS
 
             if "when_all" in combinators:
                 sm  = f"__WhenAll_{T}_SM"
                 fn  = f"__when_all_{T}_move_next"
                 fac = f"__mryl_when_all_{T}"
+
+                if is_struct:
+                    # struct 型用の MrylVec typedef をインライン生成
+                    # （_emit_vec_helpers は primitive 型のみ対象のため、ここで補完する）
+                    self._emit(f"typedef struct {{ {C}* data; int32_t len; int32_t cap; }} MrylVec_{T};")
+                    self._emit("")
+
                 self._emit(f"typedef struct {{ MrylTask** __tasks; int __count; MrylVec_{T} __result; }} {sm};")
                 self._emit(f"static void {fn}(MrylTask* __task) {{")
                 self.indent_level += 1
                 self._emit(f"{sm}* __sm = ({sm}*)__task->sm;")
-                # 全タスク完了チェック（CANCELLED も終了扱い）
+                # 全タスク完了チェック（PENDING/RUNNING 以外は done; FAULTED も Result では done）
                 self._emit("for (int __i = 0; __i < __sm->__count; __i++) {")
                 self.indent_level += 1
                 self._emit("MrylTaskState __s = __sm->__tasks[__i]->state;")
@@ -622,16 +639,33 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
                 self._emit("}")
                 self.indent_level -= 1
                 self._emit("}")
-                # 全完了 — 結果を MrylVec_T に収集
-                self._emit(f"__sm->__result = mryl_vec_{T}_new();")
-                self._emit("for (int __i = 0; __i < __sm->__count; __i++) {")
-                self.indent_level += 1
-                self._emit(f"MrylTaskState __s = __sm->__tasks[__i]->state;")
-                self._emit(f"{C} __val = (__s == MRYL_TASK_COMPLETED) ? *({C}*)__sm->__tasks[__i]->result : ({C}){{0}};")
-                self._emit(f"mryl_vec_{T}_push(&__sm->__result, __val);")
-                self._emit("__task_release(__sm->__tasks[__i]);")
-                self.indent_level -= 1
-                self._emit("}")
+
+                if is_struct:
+                    # struct 型: malloc で配列を直接構築（mryl_vec_*_push 不要）
+                    # Result タスクは COMPLETED(Ok) / FAULTED(Err) どちらも result ポインタが設定される
+                    self._emit(f"int __n = __sm->__count;")
+                    self._emit(f"{C}* __arr = ({C}*)malloc((size_t)__n * sizeof({C}));")
+                    self._emit("for (int __i = 0; __i < __n; __i++) {")
+                    self.indent_level += 1
+                    self._emit(f"MrylTaskState __s = __sm->__tasks[__i]->state;")
+                    self._emit(f"__arr[__i] = (__s != MRYL_TASK_CANCELLED && __sm->__tasks[__i]->result)")
+                    self._emit(f"    ? *({C}*)__sm->__tasks[__i]->result : ({C}){{0}};")
+                    self._emit("__task_release(__sm->__tasks[__i]);")
+                    self.indent_level -= 1
+                    self._emit("}")
+                    self._emit(f"__sm->__result = (MrylVec_{T}){{ __arr, __n, __n }};")
+                else:
+                    # primitive 型: 既存の mryl_vec_*_push を使用
+                    self._emit(f"__sm->__result = mryl_vec_{T}_new();")
+                    self._emit("for (int __i = 0; __i < __sm->__count; __i++) {")
+                    self.indent_level += 1
+                    self._emit(f"MrylTaskState __s = __sm->__tasks[__i]->state;")
+                    self._emit(f"{C} __val = (__s == MRYL_TASK_COMPLETED) ? *({C}*)__sm->__tasks[__i]->result : ({C}){{0}};")
+                    self._emit(f"mryl_vec_{T}_push(&__sm->__result, __val);")
+                    self._emit("__task_release(__sm->__tasks[__i]);")
+                    self.indent_level -= 1
+                    self._emit("}")
+
                 self._emit("free(__sm->__tasks);")
                 self._emit(f"MrylVec_{T}* __res = (MrylVec_{T}*)malloc(sizeof(MrylVec_{T}));")
                 self._emit("*__res = __sm->__result;")
@@ -674,9 +708,15 @@ class CodeGeneratorAsyncMixin(_CodeGeneratorBase):
                 self._emit("MrylTaskState __s = __sm->__tasks[__i]->state;")
                 self._emit("if (__s == MRYL_TASK_COMPLETED || __s == MRYL_TASK_FAULTED || __s == MRYL_TASK_CANCELLED) {")
                 self.indent_level += 1
-                # 最初に終了したタスクの結果を返す（COMPLETED のみ値あり）
+                # 最初に終了したタスクの結果を返す
+                # struct 型 (Result): FAULTED も result ポインタが設定されているため読む
+                # primitive 型: COMPLETED のみ result あり
                 self._emit(f"{C}* __res = ({C}*)malloc(sizeof({C}));")
-                self._emit(f"*__res = (__s == MRYL_TASK_COMPLETED) ? *({C}*)__sm->__tasks[__i]->result : ({C}){{0}};")
+                if is_struct:
+                    self._emit(f"*__res = (__s != MRYL_TASK_CANCELLED && __sm->__tasks[__i]->result)")
+                    self._emit(f"    ? *({C}*)__sm->__tasks[__i]->result : ({C}){{0}};")
+                else:
+                    self._emit(f"*__res = (__s == MRYL_TASK_COMPLETED) ? *({C}*)__sm->__tasks[__i]->result : ({C}){{0}};")
                 self._emit("for (int __j = 0; __j < __sm->__count; __j++) __task_release(__sm->__tasks[__j]);")
                 self._emit("free(__sm->__tasks);")
                 self._emit("__task->result = (void*)__res;")

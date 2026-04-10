@@ -151,7 +151,10 @@ Mryl/
 │   ├── test_47_aggregate_string.ml      # aggregate() string deep copy・ラムダ戻り値型推論（#81、C0）
 │   ├── test_48_match_box_return.ml      # match Some(b) バインド変数の二重 free 修正（#79、C0）
 │   ├── test_49_if_block_scope.ml        # if/else ブロック内リソーススコープ管理（#94、C0/C1）
-│   └── test_50_struct_destructor_order.ml # 相互参照 struct デストラクタ前方宣言（#80、C0）
+│   ├── test_50_struct_destructor_order.ml # 相互参照 struct デストラクタ前方宣言（#80、C0）
+│   ├── test_51_for_each_mutable_capture.ml # for_each ラムダ内ミュータブルキャプチャ（#83、C0/C1）
+│   ├── test_52_string_vec_free.ml       # string[] 要素 char* 解放・iter 系 Vec 二重 free 修正（#96/#97、C0/C1）
+│   └── test_53_task_result_combinator.ml # Task::when_all/any の Result<T,E> タスク対応（#84、C0/C1）
 ├── my/                               # 動作確認用 Mryl コード置き場
 ├── bin/
 │   ├── Mryl.c                # 生成された C ソースコード
@@ -224,7 +227,7 @@ Mryl/
 | `cancel(token)` | `WeakTask<T>` 経由で Task をキャンセルする組み込み関数 |
 | C コード生成 | SM 構造体 + `move_next` 関数 + ファクトリ関数 + スケジューラ |
 
-#### Task コンビネータ（v0.6.0）
+#### Task コンビネータ（v0.6.0、Result 対応: v0.7.0）
 
 複数の `Future<T>` を同時に待機する静的メソッド群。
 
@@ -233,7 +236,7 @@ Mryl/
 | `Task::when_all` | `([t1, t2, ...]: Future<T>[]) -> Future<T[]>` | 全タスク完了後に結果配列を返す（C# `Task.WhenAll` 相当） |
 | `Task::when_any` | `([t1, t2, ...]: Future<T>[]) -> Future<T>` | 最初に完了したタスクの結果を返す（C# `Task.WhenAny` 相当） |
 
-**使用例:**
+**使用例（primitive 型）:**
 ```mryl
 let t1 = fetch(1);
 let t2 = fetch(2);
@@ -241,10 +244,33 @@ let results: i32[] = await Task::when_all([t1, t2]);  // [result1, result2]
 let first: i32     = await Task::when_any([t1, t2]);  // 最初に完了した値
 ```
 
-**制限（v0.6.0）:**
+**使用例（Result<T,E> 型、v0.7.0）:**
+```mryl
+async fn fetch_ok(v: i32) -> Result<i32, string> { return Ok(v * 2); }
+async fn fetch_err(msg: string) -> Result<i32, string> { return Err(msg); }
+
+fn main() {
+    // when_all: Ok/Err 混在でも全結果を収集（Result がエラーをラップ）
+    let results: Result<i32, string>[] = await Task::when_all([fetch_ok(5), fetch_err("oops")]);
+    println("{}", results.len());   // 2
+    match results[1] {
+        Ok(v)  => println("ok: {}", v),
+        Err(e) => println("err: {}", e),   // err: oops
+    };
+
+    // when_any: 最初に完了したタスクの Result を取得（Err タスクも値として受け取れる）
+    let r: Result<i32, string> = await Task::when_any([fetch_err("fail")]);
+    match r {
+        Ok(v)  => println("ok: {}", v),
+        Err(e) => println("err: {}", e),   // err: fail
+    };
+}
+```
+
+**制限:**
 - 要素型 `T` は `void` 不可（`void` Task のコンビネータ非対応）
-- 要素型 `T` は `Result<T,E>` 不可（v0.7.0 候補 issue #XX）
 - 全要素が同一型 `T` であること（混在型不可）
+- `Result<T,E>[]` 配列リテラルの直接記述は未対応（issue #99）
 
 #### Task キャンセル（v0.6.0）
 
@@ -511,7 +537,10 @@ arr.for_each(...);            // OK: 文として使用
 | `for_each` ラムダ内ミュータブルキャプチャ非対応 | `issue_for_each_mutable_capture.md` | ✅ v0.7.0 #83 解決 |
 | iter 系 `MrylVec` 二重 free | `issue_iter_vec_double_free.md` | ✅ v0.7.0 #96 解決 |
 | `string[]` 要素 `char*` のメモリリーク | `issue_vec_string_elem_not_freed.md` | ✅ v0.7.0 #97 解決 |
+| `Task::when_all/any` で `Result<T,E>` タスク非対応 | — | ✅ v0.7.0 #84 解決 |
 | 多次元配列（`i32[][]` 以上）未対応 | `issue_2d_array_unsupported.md` | ⚠️ #82 v0.7.0 候補 |
+| `Result<T,E>[]` 配列リテラル未対応 | `issue_result_array_literal.md` | ⚠️ #99 将来対応 |
+| 型パラメータキーエンコーディング一般化 | `issue_type_key_generalization.md` | ⚠️ 将来対応 |
 | `select_many` VarRef ラムダ時の所有権 | — | ⚠️ 将来の所有権機能で対応予定 |
 
 ---

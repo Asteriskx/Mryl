@@ -847,7 +847,7 @@ fn main() {
 
 ---
 
-### Task コンビネータ（v0.6.0）
+### Task コンビネータ（v0.6.0、Result 対応: v0.7.0）
 
 複数の `Future<T>` を同時に待機する静的メソッドです。
 
@@ -877,7 +877,29 @@ fn main() {
 }
 ```
 
-> **制限（v0.6.0）**: 要素型 `T` は `void` および `Result<T,E>` 非対応。全要素が同一型であること。
+v0.7.0 以降は `Result<T,E>` 型のタスクも使用可能です。`Err` タスク（FAULTED 状態）の結果も正しく収集されます。
+
+```mryl
+async fn try_fetch(ok: bool) -> Result<i32, string> {
+    if (ok) { return Ok(42); }
+    return Err("failed");
+}
+
+fn main() {
+    // when_all: Ok/Err 混在でも全結果を収集
+    let results: Result<i32, string>[] = await Task::when_all([try_fetch(true), try_fetch(false)]);
+    println("{}", results.len());   // 2
+
+    // when_any: Err タスクの結果も値として受け取れる
+    let r: Result<i32, string> = await Task::when_any([try_fetch(false)]);
+    match r {
+        Ok(v)  => println("ok: {}", v),
+        Err(e) => println("err: {}", e),   // err: failed
+    };
+}
+```
+
+> **制限**: 要素型 `T` は `void` 非対応。全要素が同一型であること。`Result<T,E>[]` の配列リテラル直接記述は未対応（issue 未起票）。
 
 ---
 
@@ -2214,6 +2236,7 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_50_struct_destructor_order.ml](../tests/test_50_struct_destructor_order.ml) | 相互参照 struct デストラクタ前方宣言（#80、C0） | ✅ Python + C + Native |
 | [tests/test_51_for_each_mutable_capture.ml](../tests/test_51_for_each_mutable_capture.ml) | `for_each` ラムダ内ミュータブルキャプチャ（#83、C0/C1） | ✅ Python + C + Native |
 | [tests/test_52_string_vec_free.ml](../tests/test_52_string_vec_free.ml) | `string[]` 要素 `char*` 解放・iter 系 Vec 二重 free 修正（#96/#97、C0/C1） | ✅ Python + C + Native |
+| [tests/test_53_task_result_combinator.ml](../tests/test_53_task_result_combinator.ml) | `Task::when_all`/`when_any` の `Result<T,E>` タスク対応（#84、C0/C1） | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 

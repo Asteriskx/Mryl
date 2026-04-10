@@ -46,6 +46,10 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
                     # Box<T>[] → "Box_T" として登録
                     inner_name = t.type_args[0].name if t.type_args else "i32"
                     types.add(f"Box_{inner_name}")
+                elif t.name in ("Result", "Option"):
+                    # struct 型の Vec は _emit_combinator_helpers でインライン生成するため除外
+                    # "Result" 単体では C 型が確定しないため _emit_vec_helpers には渡さない
+                    pass
                 else:
                     types.add(t.name)
 
@@ -74,10 +78,23 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
                 walk_stmt(func.body)
         return types
 
+    def _type_key(self, t) -> str:
+        """TypeNode → C 識別子に使える複合キー（再帰的）。
+        例: Result<i32, string> → "Result_i32_string"
+        例: i32 → "i32"
+        現在の Mryl 型名にアンダースコアは含まれないため衝突なし。
+        3引数以上の型は将来対応（issue: issue_type_key_generalization.md）。
+        """
+        if not getattr(t, 'type_args', None):
+            return t.name
+        return t.name + "_" + "_".join(self._type_key(a) for a in t.type_args)
+
     def _collect_combinator_types(self, program) -> dict:
         """AST を走査して Task::when_all / when_any の使用型を収集する。
-        T は LetDecl の型注釈から取得する（型推論環境が未構築のため _infer_expr_type は使えない）。
-        戻り値: { T_name: set_of_combinators }  例: {"i32": {"when_all"}}
+        TypeChecker が付与した _combinator_elem_type/_combinator_elem_type_node を優先使用。
+        戻り値: { T_key: (set_of_combinators, TypeNode) }
+          例: {"i32": ({"when_all"}, TypeNode("i32")),
+               "Result_i32_string": ({"when_any"}, TypeNode("Result", type_args=[...]))}
         """
         result = {}
 
@@ -93,12 +110,20 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
                 return
             if not inner.args or not hasattr(inner.args[0], 'elements'):
                 return
-            # 型注釈から T を取得（when_all: i32[]→"i32"、when_any: i32→"i32"）
-            t = s.type_node
-            if t is None:
-                return
-            T_name = t.name  # TypeNode("i32", array_size=-1).name == "i32"
-            result.setdefault(T_name, set()).add(inner.variant_name)
+            # TypeChecker が付与したキーと TypeNode を優先使用（Result 等の複合型に対応）
+            if hasattr(inner, '_combinator_elem_type') and hasattr(inner, '_combinator_elem_type_node'):
+                T_key = inner._combinator_elem_type
+                T_node = inner._combinator_elem_type_node
+            else:
+                # フォールバック: 型注釈から取得（when_all: T[]→T, when_any: T）
+                t = s.type_node
+                if t is None:
+                    return
+                T_node = TypeNode(t.name, type_args=list(t.type_args)) if t.type_args else TypeNode(t.name)
+                T_key = self._type_key(T_node)
+            if T_key not in result:
+                result[T_key] = (set(), T_node)
+            result[T_key][0].add(inner.variant_name)
 
         def walk_stmt(s):
             if s is None:

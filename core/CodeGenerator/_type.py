@@ -25,6 +25,17 @@ class CodeGeneratorTypeMixin(_CodeGeneratorBase):
         type_name = type_node.name or ""
         base_type = type_map.get(type_name, type_name)
 
+        # 動的配列は最初にチェックする（Result<T,E>[] 等の struct 型も MrylVec_<key> を返す）
+        # 後続の "Result" / "Box" 等のチェックより前に判定しないと struct C 型が返ってしまう
+        if getattr(type_node, 'array_size', None) == -1:
+            # 型引数がある複合型（Result<i32,string>[] など）は _type_key でキーを生成する
+            # Box<T>[] も "Box_T" 形式のキーで MrylVec_Box_T が生成される
+            if getattr(type_node, 'type_args', None):
+                T_key = self._type_key(TypeNode(type_node.name, type_args=list(type_node.type_args)))
+            else:
+                T_key = type_name
+            return f"MrylVec_{T_key}"
+
         if type_node.name == "Future":
             return "MrylTask*"
 
@@ -91,11 +102,7 @@ class CodeGeneratorTypeMixin(_CodeGeneratorBase):
                 return struct_name
             return "void*"
 
-        # 動的配列 (array_size == -1) → MrylVec_<T> として扱う
         # 静的配列 (array_size > 0) → C の配列型 base_type[N] として扱う
-        if type_node.array_size == -1:
-            return f"MrylVec_{type_name}"
-
         if type_node.array_size:
             return f"{base_type}[{type_node.array_size}]"
 
