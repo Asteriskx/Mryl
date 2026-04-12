@@ -530,7 +530,20 @@ class CodeGenerator(
         func_insert_pos = len(self.code)
 
         for param in func.params:
-            self.env[-1][param.name] = param.type_node.name
+            tn = param.type_node
+            if tn and getattr(tn, 'array_size', None) == -1:
+                # 動的配列パラメータ: vec_var_types に要素型を登録し、for ループ等で使えるようにする
+                if tn.name == "Array" and getattr(tn, 'type_args', None):
+                    inner_c = self._type_to_c(tn.type_args[0])
+                    et = inner_c.replace("*", "Ptr").replace(" ", "_")
+                elif tn.name == "Box" and getattr(tn, 'type_args', None):
+                    et = f"Box_{tn.type_args[0].name}"
+                else:
+                    et = tn.name
+                self.vec_var_types[param.name] = et
+                self.env[-1][param.name] = f"vec_{et}"
+            else:
+                self.env[-1][param.name] = tn.name if tn else "i32"
 
         if func.name == "main":
             return_type              = "int"
@@ -678,12 +691,25 @@ class CodeGenerator(
         if self_type:
             method_env["self"] = self_type
         for p in other_params:
-            # ジェネリック型置換があれば解決済み型を登録 (#32)
-            resolved_tname = (
-                type_subst.get(p.type_node.name, p.type_node.name)
-                if type_subst else p.type_node.name
-            )
-            method_env[p.name] = resolved_tname
+            tn = p.type_node
+            if tn and getattr(tn, 'array_size', None) == -1:
+                # 動的配列パラメータ: vec_var_types に要素型を登録
+                if tn.name == "Array" and getattr(tn, 'type_args', None):
+                    inner_c = self._type_to_c(tn.type_args[0])
+                    et = inner_c.replace("*", "Ptr").replace(" ", "_")
+                elif tn.name == "Box" and getattr(tn, 'type_args', None):
+                    et = f"Box_{tn.type_args[0].name}"
+                else:
+                    et = type_subst.get(tn.name, tn.name) if type_subst else tn.name
+                self.vec_var_types[p.name] = et
+                method_env[p.name] = f"vec_{et}"
+            else:
+                # ジェネリック型置換があれば解決済み型を登録 (#32)
+                resolved_tname = (
+                    type_subst.get(tn.name, tn.name)
+                    if type_subst else tn.name
+                )
+                method_env[p.name] = resolved_tname
         self.env.append(method_env)
 
         has_return = False

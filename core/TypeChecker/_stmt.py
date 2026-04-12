@@ -218,7 +218,11 @@ class TypeCheckerStmtMixin(_TypeCheckerBase):
             if isinstance(stmt.iterable, Range):
                 element_type = TypeNode("i32")  # range は整数
             elif iterable_type.array_size is not None:
-                element_type = TypeNode(iterable_type.name, array_size=None, type_args=iterable_type.type_args)
+                # 多次元配列 (Array ラッパー) の場合、要素型は type_args[0]
+                if iterable_type.name == "Array" and iterable_type.type_args:
+                    element_type = iterable_type.type_args[0]
+                else:
+                    element_type = TypeNode(iterable_type.name, array_size=None, type_args=iterable_type.type_args)
             else:
                 raise TypeError_(f"Cannot iterate over {iterable_type}", stmt.iterable)
 

@@ -338,8 +338,14 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                 "f32": "float", "f64": "double", "bool": "int",
                 "string": "MrylString",
             }
+            # 多次元配列ラッパー Array<T[]> の場合: 要素 C 型は内側の MrylVec_T
+            # 例: i32[][] → TypeNode("Array", -1, [TypeNode("i32",-1)]) → et="MrylVec_i32", ct="MrylVec_i32"
+            if et == "Array" and getattr(type_node, 'type_args', None):
+                inner_c = self._type_to_c(type_node.type_args[0])
+                et      = inner_c.replace("*", "Ptr").replace(" ", "_")
+                ct      = inner_c
             # Box<T>[] の場合: 要素型 "Box_T"、C 型は T*
-            if et == "Box" and getattr(type_node, 'type_args', None):
+            elif et == "Box" and getattr(type_node, 'type_args', None):
                 inner_tn   = type_node.type_args[0]
                 inner_mryl = inner_tn.name if inner_tn else "i32"
                 et         = f"Box_{inner_mryl}"
@@ -801,14 +807,21 @@ class CodeGeneratorStmtMixin(_CodeGeneratorBase):
                         f"{loop_var_name} < {var_name}.len; {loop_var_name}++) {{"
                     )
                     self.indent_level += 1
+                    # フォールバックを et 自身にすることで MrylVec_X / struct 名も正しく扱える
                     ct = {
                         "i8": "int8_t", "i16": "int16_t", "i32": "int32_t", "i64": "int64_t",
                         "u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t", "u64": "uint64_t",
                         "f32": "float",  "f64": "double",   "bool": "int",
                         "string": "MrylString",
-                    }.get(et, "int32_t")
+                    }.get(et, et)
                     self._emit(f"{ct} {stmt.variable} = {var_name}.data[{loop_var_name}];")
                     self.env[-1][stmt.variable] = et
+                    # 多次元配列の中間次元: 要素型が MrylVec_X の場合、ネストした
+                    # for ループでも vec_var_types を参照できるよう登録する
+                    # 例: string[][] → row の et = "MrylVec_MrylString"
+                    #     for v in row → vec_var_types["row"] = "MrylString"
+                    if et.startswith("MrylVec_"):
+                        self.vec_var_types[stmt.variable] = et[len("MrylVec_"):]
                     saved_str_vars  = list(self.local_string_vars)
                     saved_box_count = len(self.local_box_vars)
                     saved_bv_count  = len(self.local_box_vec_vars)

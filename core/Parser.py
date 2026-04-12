@@ -390,7 +390,17 @@ class Parser:
             # i32[] = dynamic array, i32[N] = fixed array
             if self.current.kind == TokenKind.RBRACKET:
                 self.expect(TokenKind.RBRACKET)
-                return TypeNode(name, array_size=-1, line=line, column=col)
+                inner = TypeNode(name, array_size=-1, line=line, column=col)
+                # i32[][] / i32[][][] など多次元動的配列: 追加 [] を再帰的にラップ
+                # 各次元を TypeNode("Array", array_size=-1, type_args=[inner]) として表現する
+                while self.current.kind == TokenKind.LBRACKET:
+                    self.advance()  # consume '['
+                    if self.current.kind == TokenKind.RBRACKET:
+                        self.advance()  # consume ']'
+                        inner = TypeNode("Array", array_size=-1, type_args=[inner], line=line, column=col)
+                    else:
+                        break  # 固定長の多次元は未対応（T[][N] 等）
+                return inner
             size_tok = self.current
             size = int(size_tok.value)
             self.expect(TokenKind.NUMBER)
@@ -410,11 +420,20 @@ class Parser:
                 self.current = Token(TokenKind.GT, ">", self.current.line, self.current.column)
             else:
                 self.expect(TokenKind.GT)
-            # Box<T>[] など「ジェネリック型の動的配列」をサポート
+            # Box<T>[] など「ジェネリック型の動的配列」をサポート（多次元も同様に対応）
             if self.match(TokenKind.LBRACKET):
                 if self.current.kind == TokenKind.RBRACKET:
                     self.expect(TokenKind.RBRACKET)
-                    return TypeNode(name, type_args=type_args, array_size=-1, line=line, column=col)
+                    inner = TypeNode(name, type_args=type_args, array_size=-1, line=line, column=col)
+                    # Box<T>[][] など多次元: 追加 [] をラップ
+                    while self.current.kind == TokenKind.LBRACKET:
+                        self.advance()
+                        if self.current.kind == TokenKind.RBRACKET:
+                            self.advance()
+                            inner = TypeNode("Array", array_size=-1, type_args=[inner], line=line, column=col)
+                        else:
+                            break
+                    return inner
             return TypeNode(name, type_args=type_args, line=line, column=col)
 
         return TypeNode(name, line=line, column=col)

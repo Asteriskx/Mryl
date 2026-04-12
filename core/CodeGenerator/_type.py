@@ -28,9 +28,14 @@ class CodeGeneratorTypeMixin(_CodeGeneratorBase):
         # 動的配列は最初にチェックする（Result<T,E>[] 等の struct 型も MrylVec_<key> を返す）
         # 後続の "Result" / "Box" 等のチェックより前に判定しないと struct C 型が返ってしまう
         if getattr(type_node, 'array_size', None) == -1:
-            # 型引数がある複合型（Result<i32,string>[] など）は _type_key でキーを生成する
-            # Box<T>[] も "Box_T" 形式のキーで MrylVec_Box_T が生成される
-            if getattr(type_node, 'type_args', None):
+            if type_node.name == "Array" and getattr(type_node, 'type_args', None):
+                # 多次元配列ラッパー: 要素の C 型を再帰的に解決してキーにする
+                # 例: Array<i32[]> → elem_c="MrylVec_i32" → MrylVec_MrylVec_i32
+                elem_c = self._type_to_c(type_node.type_args[0])
+                T_key = elem_c.replace("*", "Ptr").replace(" ", "_")
+            elif getattr(type_node, 'type_args', None):
+                # 型引数がある複合型（Result<i32,string>[] など）は _type_key でキーを生成する
+                # Box<T>[] も "Box_T" 形式のキーで MrylVec_Box_T が生成される
                 T_key = self._type_key(TypeNode(type_node.name, type_args=list(type_node.type_args)))
             else:
                 T_key = type_name

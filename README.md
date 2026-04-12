@@ -34,7 +34,8 @@
 22. [Box 型（ヒープポインタ）](#box-型ヒープポインタ)
 23. [配列（固定長）](#配列固定長)
 24. [可変長配列（T[]）](#可変長配列t)
-25. [組み込み関数](#組み込み関数)
+25. [多次元配列（T[][]）](#多次元配列t)
+26. [組み込み関数](#組み込み関数)
 26. [string 組み込みメソッド](#string-組み込みメソッド)
 27. [Iter\<T\> / LINQ スタイルコレクション操作](#itert--linq-スタイルコレクション操作)
 28. [型推論](#型推論)
@@ -1862,6 +1863,63 @@ while (!v.is_empty()) {
 }
 ```
 
+---
+
+## 多次元配列（T[][]）
+
+`T[][]` 構文で動的配列の動的配列（2次元以上）を扱えます。
+
+### 宣言と初期化
+
+```mryl
+// 2次元 i32 配列
+let matrix: i32[][] = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+
+// 2次元 f64 配列
+let fmat: f64[][] = [[1.0, 2.5], [3.0, 4.5]];
+
+// 2次元 string 配列
+let smat: string[][] = [["hello", "world"], ["foo", "bar"]];
+
+// 3次元配列
+let cube: i32[][][] = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]];
+```
+
+### インデックスアクセス・代入
+
+```mryl
+let val = matrix[1][2];   // 6
+matrix[0][0] = 99;
+```
+
+### for ループ
+
+```mryl
+for row in matrix {
+    for v in row {
+        println("{}", v);
+    }
+}
+```
+
+### 関数引数
+
+```mryl
+fn sum_matrix(mat: i32[][]) -> i32 {
+    let total: i32 = 0;
+    for row in mat {
+        for v in row {
+            total = total + v;
+        }
+    }
+    return total;
+}
+```
+
+> **制限**:
+> - 固定長多次元配列（`T[3][4]` 等）は未対応
+> - 型チェックは次元数のみ検証（要素型は厳密には検査しない）
+
 ### C コード生成
 
 動的配列は内部的に `MrylVec_<T>` 構造体としてコンパイルされます：
@@ -2237,6 +2295,7 @@ Mryl は以下の特徴を備えた最小限の本格プログラミング言語
 | [tests/test_51_for_each_mutable_capture.ml](../tests/test_51_for_each_mutable_capture.ml) | `for_each` ラムダ内ミュータブルキャプチャ（#83、C0/C1） | ✅ Python + C + Native |
 | [tests/test_52_string_vec_free.ml](../tests/test_52_string_vec_free.ml) | `string[]` 要素 `char*` 解放・iter 系 Vec 二重 free 修正（#96/#97、C0/C1） | ✅ Python + C + Native |
 | [tests/test_53_task_result_combinator.ml](../tests/test_53_task_result_combinator.ml) | `Task::when_all`/`when_any` の `Result<T,E>` タスク対応（#84、C0/C1） | ✅ Python + C + Native |
+| [tests/test_54_multidim_array.ml](../tests/test_54_multidim_array.ml) | 多次元配列 `i32[][]`/`f64[][]`/`bool[][]`/`string[][]`/`i32[][][]`（#82、C0/C1） | ✅ Python + C + Native |
 
 実行方法は「[セットアップ](#セットアップ)」を参照してください。
 

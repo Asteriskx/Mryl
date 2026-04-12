@@ -314,6 +314,12 @@ class CodeGeneratorGenericMixin(_CodeGeneratorBase):
                         if t.startswith("vec_"):
                             return t[4:]
                         return t
+            # VarRef でない場合（例: matrix[0][1] の外側アクセス）は
+            # 内側式の型から要素型を剥ぎ取る。
+            # "MrylVec_X" → 要素型 "X" として返す（多次元配列の再帰的型推論）
+            arr_type = self._infer_expr_type(expr.array)
+            if isinstance(arr_type, str) and arr_type.startswith("MrylVec_"):
+                return arr_type[len("MrylVec_"):]
             return "i32"
 
         if expr_class == "EnumVariantExpr":

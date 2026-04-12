@@ -94,7 +94,13 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             arr      = self._generate_expr(expr.array)
             idx      = self._generate_expr(expr.index)
             arr_name = expr.array.name if expr.array.__class__.__name__ == 'VarRef' else None
+            # VarRef が vec_var_types に登録されている場合は MrylVec → .data[i]
             if arr_name and arr_name in self.vec_var_types:
+                return f"{arr}.data[{idx}]"
+            # 非 VarRef（例: matrix[0][1] の外側アクセス）で、内側が MrylVec の場合も .data[i]
+            # _infer_expr_type が "MrylVec_X" を返せばネストした Vec アクセスと判定する
+            arr_type = self._infer_expr_type(expr.array)
+            if isinstance(arr_type, str) and arr_type.startswith("MrylVec_"):
                 return f"{arr}.data[{idx}]"
             return f"{arr}[{idx}]"
 
@@ -116,9 +122,11 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
         if expr_class == "ArrayLiteral":
             # 動的配列リテラルを式として生成する。
             # LetDecl 以外（ラムダの return 式など）で配列リテラルが使われた場合に対応。
-            # mryl_vec_{et}_from((ct[]){elems...}, n) として新規 MrylVec を返す。
+            # 要素が ArrayLiteral の場合（多次元）は再帰ヘルパーに委譲する。
             if not expr.elements:
                 return "/* empty array literal */"
+            if expr.elements[0].__class__.__name__ == "ArrayLiteral":
+                return self._generate_multidim_array_literal(expr)
             elem_t  = self._infer_expr_type(expr.elements[0])
             ct      = self._type_to_c_base(elem_t)
             elems_c = ", ".join(f"({ct}){self._generate_expr(e)}" for e in expr.elements)
@@ -1303,4 +1311,53 @@ class CodeGeneratorExprMixin(_CodeGeneratorBase):
             )
 
         raise RuntimeError(f"Unknown iter method in codegen: {method}")
+
+    # ------------------------------------------------------------------
+    # 多次元配列リテラル生成ヘルパー
+    # ------------------------------------------------------------------
+
+    def _get_array_literal_vec_key(self, expr) -> str:
+        """ArrayLiteral の要素型キーを再帰的に解決する（多次元配列対応）。
+        例: [1, 2]       → "i32"
+            [[1,2],[3,4]] → "MrylVec_i32"
+            [[[1]]]       → "MrylVec_MrylVec_i32"
+        """
+        if not expr.elements:
+            return "i32"
+        first = expr.elements[0]
+        if first.__class__.__name__ == "ArrayLiteral":
+            inner_key = self._get_array_literal_vec_key(first)
+            return f"MrylVec_{inner_key}"
+        return self._infer_expr_type(first)
+
+    def _generate_multidim_array_literal(self, expr) -> str:
+        """ネスト ArrayLiteral（多次元配列リテラル）を再帰的に C コードに変換する。
+        C99 のブロックスコープ compound literal では function call を要素に使えるため、
+        一時変数を使わずにインライン生成する。
+        例: [[1,2],[3,4]] →
+            mryl_vec_MrylVec_i32_from(
+                (MrylVec_i32[]){
+                    mryl_vec_i32_from((int32_t[]){1, 2}, 2),
+                    mryl_vec_i32_from((int32_t[]){3, 4}, 2)
+                }, 2)
+        """
+        if not expr.elements:
+            return "/* empty */"
+        first = expr.elements[0]
+        if first.__class__.__name__ == "ArrayLiteral":
+            # 内側も ArrayLiteral → 再帰
+            inner_key = self._get_array_literal_vec_key(first)
+            outer_et  = f"MrylVec_{inner_key}"
+            elems_c   = ", ".join(
+                self._generate_multidim_array_literal(e) for e in expr.elements
+            )
+            n = len(expr.elements)
+            return f"mryl_vec_{outer_et}_from(({outer_et}[]){{{elems_c}}}, {n})"
+        else:
+            # 最内層: スカラー配列
+            elem_t  = self._infer_expr_type(first)
+            ct      = self._type_to_c_base(elem_t)
+            elems_c = ", ".join(f"({ct}){self._generate_expr(e)}" for e in expr.elements)
+            n       = len(expr.elements)
+            return f"mryl_vec_{elem_t}_from(({ct}[]){{{elems_c}}}, {n})"
 

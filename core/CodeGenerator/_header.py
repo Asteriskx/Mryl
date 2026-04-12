@@ -37,12 +37,21 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
     def _collect_vec_elem_types(self, program) -> set:
         """AST を走査して動的配列 (array_size == -1) の要素型名を収集する。
         Box<T> 要素は "Box_T" 形式（例: Box_i32）で登録する。
+        多次元配列 (Array ラッパー) は内側の型を再帰的に収集し、
+        外側の Vec 要素型（"MrylVec_X" 形式）も登録する。
         """
         types = set()
 
         def walk_type(t):
             if t and getattr(t, 'array_size', None) == -1:
-                if t.name == "Box" and getattr(t, 'type_args', None):
+                if t.name == "Array" and getattr(t, 'type_args', None):
+                    # 多次元配列: 内側の型を先に収集（typedef の順序依存を解決するため）
+                    walk_type(t.type_args[0])
+                    # 外側 Vec の要素型キーは内側の C 型名そのもの（例: "MrylVec_i32"）
+                    inner_c = self._type_to_c(t.type_args[0])
+                    T_key = inner_c.replace("*", "Ptr").replace(" ", "_")
+                    types.add(T_key)
+                elif t.name == "Box" and getattr(t, 'type_args', None):
                     # Box<T>[] → "Box_T" として登録
                     inner_name = t.type_args[0].name if t.type_args else "i32"
                     types.add(f"Box_{inner_name}")
@@ -160,7 +169,25 @@ class CodeGeneratorHeaderMixin(_CodeGeneratorBase):
         self._emit("// Dynamic array (MrylVec_<T>) types and helpers")
         self._emit("// ============================================================")
         self._emit("")
-        for et in sorted(elem_types):
+        # 多次元配列対応: MrylVec_X の typedef は X の typedef より後に来なければならないため
+        # トポロジカルソートで依存順に並べ替える。
+        # 例: {"i32", "MrylVec_i32"} → ["i32", "MrylVec_i32"]
+        def _topo_sorted(types: set) -> list:
+            result, visited = [], set()
+            def visit(t):
+                if t in visited:
+                    return
+                visited.add(t)
+                # "MrylVec_X" は X が先に定義される必要がある
+                if t.startswith("MrylVec_"):
+                    dep = t[len("MrylVec_"):]
+                    if dep in types:
+                        visit(dep)
+                result.append(t)
+            for t in sorted(types):
+                visit(t)
+            return result
+        for et in _topo_sorted(elem_types):
             # Box_T 形式: 要素の C 型は T* （Box<T> = ヒープポインタ）
             if et.startswith("Box_"):
                 inner_mryl = et[4:]  # "Box_i32" → "i32"

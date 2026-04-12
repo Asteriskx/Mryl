@@ -426,6 +426,10 @@ class TypeCheckerExprMixin(_TypeCheckerBase):
         if array_type.array_size is None:
             raise TypeError_("Not an array", expr.array)
 
+        # 多次元配列 (Array ラッパー) の場合、要素型は type_args[0]
+        if array_type.name == "Array" and array_type.type_args:
+            return array_type.type_args[0]
+
         return TypeNode(array_type.name)
 
     # ============================================
@@ -441,5 +445,12 @@ class TypeCheckerExprMixin(_TypeCheckerBase):
             t = self.check_expr(e)
             if not self.types_equal(t, first_type):
                 raise TypeError_("All elements in array literal must have same type", e)
+
+        # 要素が配列型の場合（ネスト配列リテラル: [[1,2],[3,4]] など）は
+        # "Array" ラッパーを返して多次元配列として型付けする
+        if first_type.array_size is not None:
+            # 内側を動的配列として正規化 (size を -1 に統一)
+            inner = TypeNode(first_type.name, array_size=-1, type_args=list(first_type.type_args))
+            return TypeNode("Array", array_size=len(expr.elements), type_args=[inner])
 
         return TypeNode(first_type.name, len(expr.elements))

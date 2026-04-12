@@ -154,7 +154,8 @@ Mryl/
 │   ├── test_50_struct_destructor_order.ml # 相互参照 struct デストラクタ前方宣言（#80、C0）
 │   ├── test_51_for_each_mutable_capture.ml # for_each ラムダ内ミュータブルキャプチャ（#83、C0/C1）
 │   ├── test_52_string_vec_free.ml       # string[] 要素 char* 解放・iter 系 Vec 二重 free 修正（#96/#97、C0/C1）
-│   └── test_53_task_result_combinator.ml # Task::when_all/any の Result<T,E> タスク対応（#84、C0/C1）
+│   ├── test_53_task_result_combinator.ml # Task::when_all/any の Result<T,E> タスク対応（#84、C0/C1）
+│   └── test_54_multidim_array.ml        # 多次元配列 i32[][]・f64[][]・bool[][]・string[][]・i32[][][]（#82、C0/C1）
 ├── my/                               # 動作確認用 Mryl コード置き場
 ├── bin/
 │   ├── Mryl.c                # 生成された C ソースコード
@@ -179,7 +180,8 @@ Mryl/
 | `f32, f64` | 浮動小数点数 | `float`, `double` |
 | `string` | 文字列 | `MrylString` (struct) |
 | `bool` | ブール値 | `int` (1/0) |
-| `T[]` | 配列 | C 配列 |
+| `T[]` | 1次元動的配列 | `MrylVec_T` struct |
+| `T[][]` / `T[][][]` | 多次元動的配列（N次元対応） | `MrylVec_MrylVec_T` 等（入れ子 struct） |
 
 ### 3.2 const 定数
 
@@ -538,7 +540,9 @@ arr.for_each(...);            // OK: 文として使用
 | iter 系 `MrylVec` 二重 free | `issue_iter_vec_double_free.md` | ✅ v0.7.0 #96 解決 |
 | `string[]` 要素 `char*` のメモリリーク | `issue_vec_string_elem_not_freed.md` | ✅ v0.7.0 #97 解決 |
 | `Task::when_all/any` で `Result<T,E>` タスク非対応 | — | ✅ v0.7.0 #84 解決 |
-| 多次元配列（`i32[][]` 以上）未対応 | `issue_2d_array_unsupported.md` | ⚠️ #82 v0.7.0 候補 |
+| 多次元配列（`i32[][]` 以上）未対応 | `issue_2d_array_unsupported.md` | ✅ v0.7.0 #82 解決 |
+| 多次元配列の固定長形式（`T[3][4]` 等）未対応 | — | ⚠️ 将来対応 |
+| 多次元配列の型チェックが次元数のみ検証（要素型の厳密チェックなし） | — | ⚠️ 将来対応 |
 | `Result<T,E>[]` 配列リテラル未対応 | `issue_result_array_literal.md` | ⚠️ #99 将来対応 |
 | 型パラメータキーエンコーディング一般化 | `issue_type_key_generalization.md` | ⚠️ 将来対応 |
 | `select_many` VarRef ラムダ時の所有権 | — | ⚠️ 将来の所有権機能で対応予定 |
