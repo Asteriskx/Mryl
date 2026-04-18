@@ -93,13 +93,16 @@ class TypeChecker(TypeCheckerStmtMixin, TypeCheckerExprMixin, TypeCheckerCallMix
         if a.name == "any" or b.name == "any":
             return True
 
-        # Result 型: パラメータなしの Result は基底型名だけで一致
+        # Result / Option: 片方でも type_args がない場合（型推論未解決）は名前だけで一致とする。
+        # 両方に type_args がある場合のみ後段の通常比較（型引数を再帰チェック）に委ねる。
+        # ※ 両方 type_args ありで早期 True を返すと Result<i32,E> と Result<f64,E> が
+        #    同一型と判定されてしまうため、両方 type_args ありの場合はフォールスルーする。
         if a.name == "Result" and b.name == "Result":
-            return True
-
-        # Option 型: パラメータなしの Option は基底型名だけで一致
+            if not a.type_args or not b.type_args:
+                return True
         if a.name == "Option" and b.name == "Option":
-            return True
+            if not a.type_args or not b.type_args:
+                return True
 
         # 配列型の比較: 一方のみ配列型はスカラーと配列の不一致 → False
         if a.array_size is not None or b.array_size is not None:

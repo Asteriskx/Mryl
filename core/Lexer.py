@@ -417,6 +417,10 @@ class Lexer:
                 self.advance()
                 if self.current_char == 'n':
                     value_chars.append('\n')
+                elif self.current_char == 't':
+                    value_chars.append('\t')
+                elif self.current_char == 'r':
+                    value_chars.append('\r')
                 elif self.current_char == '"':
                     value_chars.append('"')
                 elif self.current_char == '\\':

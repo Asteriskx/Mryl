@@ -79,8 +79,7 @@ class TypeNode(AST):
         elif isinstance(type_args, list):
             self.type_args = type_args
         else:
-            # DEBUG: unexpected type_args format
-            print("DEBUG TypeNode: invalid type_args:", name, array_size, type_args, type(type_args))
+            # type_args が想定外の型の場合は空リストにフォールバック
             self.type_args = []
 
     def __repr__(self):

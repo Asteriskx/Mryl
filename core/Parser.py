@@ -40,7 +40,7 @@ class Parser:
         enums = {}      # name -> EnumDecl
 
         # Skip initial non-significant tokens
-        self.skip_non_pist()
+        self.skip_non_declaration()
 
         while self.current.kind != TokenKind.EOF:
             # Parse const declarations first
@@ -1555,7 +1555,7 @@ class Parser:
             params.append(self.expect(TokenKind.IDENT).value)
         return params
 
-    def skip_non_pist(self):
+    def skip_non_declaration(self):
         while self.current.kind not in (TokenKind.FN, TokenKind.STRUCT, TokenKind.CONST,
                                         TokenKind.ASYNC, TokenKind.ENUM, TokenKind.EOF):
             self.advance()
